@@ -62,6 +62,9 @@ def main():
 
     gif_cam = SceneRenderer(sim, 400, 300) if args.gif else None
     viewer = _open_viewer(sim) if args.viewer else None
+    if viewer is not None:
+        print("Viewer open (it may be behind other windows: Cmd+Tab to 'mjpython'). Starting in 5 s...")
+        _hold(viewer, 5.0)
 
     result = run_mission(sim, autonomy, max_time=sc.max_time, expected_targets=sc.route,
                          on_event=on_event, on_tick=on_tick, name=sc.name)
@@ -80,7 +83,16 @@ def main():
     print(format_report(result.summary))
     print(f"\nOutputs in {out}/")
     if viewer is not None:
-        viewer.close()
+        print("\nMission over. Close the viewer window (or Ctrl+C) to exit.")
+        _hold(viewer, float("inf"))
+
+
+def _hold(viewer, seconds):
+    """Keep the viewer responsive without advancing the simulation."""
+    end = time.time() + seconds
+    while viewer.is_running() and time.time() < end:
+        viewer.sync()
+        time.sleep(0.03)
 
 
 def _open_viewer(sim):
