@@ -16,12 +16,12 @@ from .anomaly_scoring import score_anomalies
 from .harness import run_mission
 
 
-def run_scenario(sc, registration=True, calibrated=True) -> dict:
+def run_scenario(sc, registration=True, calibrated=True, active=True) -> dict:
     """One full mission under the scenario's conditions -> flat summary dict."""
     c = sc.conditions
     sim = SpaceSim(sc.vehicle, sc.world, start_pos=sc.home, sun_dir=c.sun_dir(sc.seed))
     agent = make_inspection_agent(sc.vehicle, sc.spacecraft, sc.home, sc.route, registration=registration,
-                                  calibrated=calibrated)
+                                  calibrated=calibrated, active=active)
     result = run_mission(sim, agent, max_time=sc.max_time, expected_targets=sc.route,
                          camera=OnboardCamera(sim, seed=sc.seed), nav=c.navigation(sc.seed),
                          log_hz=2.0, name=sc.name)
@@ -30,6 +30,8 @@ def run_scenario(sc, registration=True, calibrated=True) -> dict:
     s.update(asdict(c))
     s["seed"] = sc.seed
     s["registration"] = registration
+    s["active"] = agent.active is not None
+    s["reinspections"] = sum(e["event"] == "reinspect_planned" for e in result.events)
     s["pose_errors"] = pose_errors(result.events)
     s["assessments"] = assessment_rows(result.events, sc)
     s["false_alarm_kinds"] = [b.kind for n, b in agent.world_model.beliefs.items()
@@ -46,6 +48,7 @@ def assessment_rows(events, sc) -> list[dict]:
             continue
         actual = truth.get(e["leg"], "nominal")
         rows.append({"mission": sc.name, "seed": sc.seed, **asdict(sc.conditions), "component": e["leg"],
+                     "look": e.get("look", 1),
                      "truth": actual, "verdict": e["result"], "correct": int(e["result"] == actual),
                      "heuristic_confidence": e["heuristic_confidence"], "confidence": e["confidence"],
                      **e["features"]})
@@ -70,13 +73,13 @@ def pose_errors(events) -> list[dict]:
     return out
 
 
-def run_many(scenarios, workers=None, progress=None, registration=True) -> list[dict]:
+def run_many(scenarios, workers=None, progress=None, **agent_options) -> list[dict]:
     """Missions in parallel processes, results in input order."""
     workers = workers or max(1, (os.cpu_count() or 2) - 2)
     if workers == 1:
         out = []
         for i, sc in enumerate(scenarios):
-            out.append(run_scenario(sc, registration))
+            out.append(run_scenario(sc, **agent_options))
             if progress:
                 progress(i + 1, len(scenarios))
         return out
@@ -87,7 +90,7 @@ def run_many(scenarios, workers=None, progress=None, registration=True) -> list[
         os.environ.setdefault(var, "1")
     # "spawn" gives each worker a clean process, so each gets its own rendering context.
     with ProcessPoolExecutor(workers, mp_context=get_context("spawn")) as pool:
-        futures = [pool.submit(run_scenario, sc, registration) for sc in scenarios]
+        futures = [pool.submit(run_scenario, sc, **agent_options) for sc in scenarios]
         out = []
         for i, f in enumerate(futures):
             out.append(f.result())
@@ -127,7 +130,9 @@ def aggregate(summaries, n_targets) -> dict:
         "type_accuracy": correct / found if found else np.nan, "type_accuracy_ci": wilson(correct, found),
         "false_alarm_rate": fa / healthy if healthy else np.nan, "false_alarm_rate_ci": wilson(fa, healthy),
         "mean_time_s": float(np.mean([s["mission_time_s"] for s in summaries])),
+        "time_sem_s": float(np.std([s["mission_time_s"] for s in summaries]) / np.sqrt(len(summaries))),
         "mean_propellant_pct": float(np.mean([s["propellant_used_pct"] for s in summaries])),
+        "mean_reinspections": float(np.mean([s.get("reinspections", 0) for s in summaries])),
         "min_clearance_m": float(min(s["min_clearance_m"] for s in summaries)),
         "false_alarm_kinds": Counter(k for s in summaries for k in s["false_alarm_kinds"]),
         **_pose_error_medians(summaries),

@@ -25,7 +25,7 @@ evaluation harness that measures what actually happened.
 | M6.1 | Registration: twin aligned to the camera; robust to ~1 cm / 0.5° navigation error | ✅ |
 | M6.2 | Calibrated confidence, learned from simulated missions and measured on held-out ones | ✅ |
 | M10–M11 | Randomised missions, batch scoring, noise sweep (pose + lighting) | ✅ (early) |
-| M7 | Decide what to inspect next from what's still uncertain | next |
+| M7 | Active inspection: look again from another viewpoint when unsure | ✅ |
 | M8–M9 | Unexpected obstacle, autonomous recovery | |
 | M12+ | Learned perception / planning, ROS 2, Isaac Sim | |
 
@@ -250,6 +250,56 @@ Caveats: the "nominal" verdict was never wrong in training (every injected fault
 trusts it at ~100%. That's fine for these faults but would be overconfident against subtler ones. The
 middle confidence bins in the reliability plot hold few verdicts, so they're noisy.
 
+## M7: look again when unsure
+
+With an honest confidence, the robot can act on its doubt. After each look it keeps its most confident
+verdict so far. If that's still below **90%**, it doesn't report yet: it picks another viewpoint (the usual
+view direction tilted 30°, same distance, safe to reach and with a clear line of sight), flies there and
+looks again. It does this up to two extra times per component. The rest of the route is replanned from wherever
+the detour ends, so it never cuts through the spacecraft.
+
+Why it can work: a navigation error drifts, and a different viewpoint sees the part from a different angle.
+A look that was misregistered at one moment and angle often isn't at the next.
+
+Three pipelines on the same 41 spacecraft per level, on **fresh seeds (5000+)** so the confidence model has never
+seen these missions. 2,214 missions in all:
+
+![re-inspection comparison](docs/media/reinspection_comparison.png)
+
+| Condition | False alarms: registration only → + re-inspection | Correct type | Re-looks per mission | Mission time |
+|---|---|---|---|---|
+| No noise | 0% → 0% | 100% → 100% | 0.6 | 288 → 298 s |
+| Position error 2 cm | 9% → **0%** | 96% → 100% | 1.2 | 289 → 316 s |
+| Position error 4 cm | 32% → **10%** | 88% → 100% | 3.7 | 292 → 372 s |
+| Attitude error 1° | 15% → **1%** | 96% → 100% | 1.8 | 288 → 324 s |
+| Attitude error 2° | 64% → **31%** | 78% → 88% | 7.3 | 288 → 438 s |
+| Sun error 20° | 19% → 15% | 100% → 100% | 2.2 | 288 → 331 s |
+
+What looking again actually did, over every component it looked at more than once:
+
+| Outcome | Components |
+|---|---|
+| **Rescued:** first verdict wrong, final belief right | **292** |
+| Unchanged: right both times | 249 |
+| Still wrong after looking again | 299 |
+| **Spoiled:** first verdict right, final belief wrong | **5** |
+
+- **Re-inspection extends the working range.** It holds false alarms near zero out to ~2 cm and ~1° of navigation
+  error (registration alone: ~1 cm and ~0.5°), and halves them at 2°. 0 collisions in all 2,214 missions.
+- **It almost never hurts:** 292 rescued against 5 spoiled. Keeping the *most confident* look is safe because the
+  confidence is calibrated: a confident wrong look is rare by construction.
+- **The cost scales with doubt, which is the point.** On easy missions it adds ~10 s (3%). At 2° it doubles
+  the number of looks (7 → ~14) and adds 52% to mission time and ~20 points of propellant. A real mission would cap this
+  with a time/fuel budget; that trade-off is now measurable.
+- **It doesn't help with lighting** (19% → 15% at 20°). The sun is just as wrong from every viewpoint, so a second
+  look repeats the same mistake. Re-inspection only helps errors that differ between looks. The robot can't yet
+  tell which kind of doubt it has, so it still spends 2–4 re-looks per mission there.
+- **Even with no noise it re-checks 0.6 times per mission**, because some *correct* verdicts score just under 90%.
+  That's the price of a threshold. Lowering it would trade wasted looks for missed rescues.
+- **Calibration holds up, a bit worse, on the tilted viewpoints** the confidence model never trained on:
+  calibration error 0.010 on first looks vs 0.059 on re-looks (AUROC 0.991 vs 0.927). Re-looks are only right
+  49% of the time, because they only happen in hard cases, and their mean confidence (0.46) tracks that.
+
 ## Quick start
 
 macOS / Linux, Python 3.10+:
@@ -266,9 +316,11 @@ python scripts/run_mission.py --seed 7       # a random damaged spacecraft
 python scripts/run_mission.py --clean        # undamaged spacecraft
 python scripts/batch_eval.py --runs 100      # many random missions -> results/batch/summary.md
 python scripts/batch_eval.py --runs 100 --nav-att-deg 0.25   # ...with navigation error (also --nav-pos-cm, --sun-deg)
-python scripts/noise_sweep.py                # degradation curves, with vs without registration (~18 min)
+python scripts/noise_sweep.py                # degradation curves for all three pipelines (~40 min)
+python scripts/relook_analysis.py            # what re-inspection rescued / spoiled (after a sweep)
 python scripts/calibrate.py                  # refit + measure the confidence model (needs two sweeps; see the script)
 python scripts/run_mission.py --showcase --nav-att-deg 0.5 --no-registration   # see what a false alarm looks like
+python scripts/run_mission.py --showcase --nav-att-deg 1.5   # watch it doubt the antenna and look again (--passive to compare)
 mjpython scripts/run_mission.py --viewer     # watch live (macOS needs `mjpython`, installed with MuJoCo)
 pytest
 ```
@@ -308,12 +360,13 @@ too, but only as a renderer for the *nominal* model; any renderer would do.)
 | [`scenarios/conditions.py`](space_autonomy/scenarios/conditions.py) | How far reality departs from the robot's assumptions: navigation error, sun-direction error. |
 | [`controllers/pose_controller.py`](space_autonomy/controllers/pose_controller.py) | Cascaded controller: position error → desired velocity (capped at 0.25 m/s) → force. Same idea for attitude. |
 | [`planning/paths.py`](space_autonomy/planning/paths.py) | Fly straight if it's safe; otherwise back out to a keep-out sphere, go around it, come back in. |
-| [`planning/sequencer.py`](space_autonomy/planning/sequencer.py) | Executes legs: fly through waypoints, settle, point the camera, hold, next. |
+| [`planning/sequencer.py`](space_autonomy/planning/sequencer.py) | Executes legs: fly through waypoints, settle, point the camera, hold, next. Accepts detours mid-mission. |
+| [`planning/inspection_planner.py`](space_autonomy/planning/inspection_planner.py) | The fixed route, plus alternate viewpoints (safe, clear line of sight) for re-inspection. |
 | [`perception/reference.py`](space_autonomy/perception/reference.py) | Digital twin: renders the nominal spacecraft from the robot's pose (colour, depth, which-component-is-where). |
 | [`perception/registration.py`](space_autonomy/perception/registration.py) | Lines the twin up with the camera: point-to-plane ICP on depth, then Lucas–Kanade on the image. |
 | [`perception/change_detection.py`](space_autonomy/perception/change_detection.py) | Compares the real and expected images and names the anomaly. |
 | [`perception/calibration.py`](space_autonomy/perception/calibration.py) | Learned confidence (per-verdict logistic regression) and calibration metrics; the trained model ships as `confidence_model.json`. |
-| [`autonomy/agent.py`](space_autonomy/autonomy/agent.py), [`world_model.py`](space_autonomy/autonomy/world_model.py) | Ties planning, control and perception together; keeps the robot's beliefs. |
+| [`autonomy/agent.py`](space_autonomy/autonomy/agent.py), [`world_model.py`](space_autonomy/autonomy/world_model.py) | Ties planning, control and perception together; looks again when unsure; keeps the robot's beliefs. |
 | [`evaluation/`](space_autonomy/evaluation/) | Mission harness, anomaly scoring, parallel batch runner with confidence intervals, reports, plots. |
 
 ### Key ideas (in plain terms)
@@ -352,7 +405,7 @@ space_autonomy/
   core/          shared types, rotations, geometry
   sim/           MuJoCo world, thrusters, spacecraft builder, anomalies, sensors, rendering
   controllers/   pose controller
-  planning/      paths, leg sequencer, fixed-route inspection planner
+  planning/      paths, leg sequencer, inspection planner (route + re-inspection viewpoints)
   perception/    digital twin + change detection
   autonomy/      inspection agent, world model
   evaluation/    mission harness, anomaly scoring, reports, plots
@@ -365,9 +418,9 @@ results/         run outputs (git-ignored)
 
 ## What's next
 
-1. **M7, active inspection:** the confidence is now honest, so use it. Below a threshold, go and look again
-   from a different viewpoint instead of reporting. On the held-out data, the verdicts under 90% confidence were
-   right only 24% of the time, so they're exactly the ones worth a second look.
+1. **Budgeted re-inspection:** decide whether a second look is worth its fuel and time (expected gain in
+   correctness vs. cost), instead of a fixed 90% threshold, and pick the viewpoint expected to be most informative
+   rather than the nearest.
 2. **Lighting-robust comparison:** compare shading-invariant features (or relight the twin) so sun error stops
    causing false surface damage, and add lighting faults to the confidence model's training data.
 3. **Subtler faults:** smaller debris, partial damage, so that "nominal" verdicts can be wrong and the confidence

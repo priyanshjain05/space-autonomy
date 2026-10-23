@@ -1,9 +1,8 @@
 """What the robot believes about the spacecraft, component by component.
 
-This is the robot's memory of the mission. Today it only records the most
-recent observation of each component. It is also what a smarter planner
-(M7) will read to decide where to look next: anything still
-"not_inspected" or low-confidence is worth a visit.
+This is the robot's memory of the mission: for each component, the verdict
+it currently believes and how sure it is. The agent decides which of
+several looks to believe (the most confident one).
 """
 
 from dataclasses import asdict, dataclass
@@ -26,9 +25,10 @@ class WorldModel:
     def __init__(self, components):
         self.beliefs = {c: Belief(c) for c in components}
 
-    def update(self, a: Assessment):
+    def update(self, a: Assessment, observations: int | None = None):
+        """Believe `a` about its component (the agent decides which look to believe)."""
         b = self.beliefs[a.component]
-        b.observations += 1
+        b.observations = observations if observations is not None else b.observations + 1
         b.confidence = round(a.confidence, 3)
         if a.kind == NOMINAL:
             b.status, b.kind = OK, None

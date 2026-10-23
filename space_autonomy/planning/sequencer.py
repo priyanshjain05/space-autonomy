@@ -23,7 +23,7 @@ class Leg:
     goal_quat: np.ndarray | None = None  # ... or hold this exact attitude
     transit_look_at: np.ndarray | None = None  # what to face while travelling (None: goal attitude)
     dwell: float = 0.0                # s to hold at the goal (e.g. to take images)
-    kind: str = "goto"                # "inspect" | "goto" | "return"
+    kind: str = "goto"                # "inspect" | "reinspect" | "goto" | "return"
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,17 @@ class LegSequencer:
 
         self._target_pos, self._target_quat = target, quat
         return self.controller.command(s, target, quat, cruise=not at_goal_wp)
+
+    def detour(self, leg: Leg, replan_next) -> None:
+        """Fly `leg` right after the current one, then carry on.
+
+        The next leg's path was planned from where the robot is now, not from
+        the end of the detour, so it is replaced: replan_next(old_leg, start)
+        returns the same leg planned from `start`.
+        """
+        i = self.leg_index + 1
+        after = [replan_next(self.legs[i], leg.waypoints[-1])] if i < len(self.legs) else []
+        self.legs[i:i + 1] = [leg] + after
 
     def _settled(self, s, target, quat) -> bool:
         t = self.tol

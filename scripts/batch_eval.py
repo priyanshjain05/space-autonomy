@@ -28,6 +28,7 @@ def main():
     ap.add_argument("--nav-att-deg", type=float, default=0.0, help="navigation attitude error, deg per axis")
     ap.add_argument("--sun-deg", type=float, default=0.0, help="error in the sun direction the twin assumes")
     ap.add_argument("--no-registration", action="store_true", help="compare against the unaligned twin")
+    ap.add_argument("--passive", action="store_true", help="one look per component, no re-inspection")
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--out", default="results/batch")
     args = ap.parse_args()
@@ -41,7 +42,7 @@ def main():
     t0 = time.time()
     summaries = run_many(scenarios, args.workers,
                          lambda i, n: print(f"\r{i}/{n} missions", end="", flush=True),
-                         registration=not args.no_registration)
+                         registration=not args.no_registration, active=not args.passive)
     print(f"  ({time.time() - t0:.0f} s)\n")
 
     agg = aggregate(summaries, len(nominal().route))
@@ -59,7 +60,7 @@ def main():
         "",
         f"{agg['missions']} missions ({args.runs} randomised + 1 clean), seeds "
         f"{args.first_seed}-{args.first_seed + args.runs - 1}, conditions: {cond.label()}, "
-        f"registration {'off' if args.no_registration else 'on'}",
+        f"registration {'off' if args.no_registration else 'on'}, re-inspection {'off' if args.passive else 'on'}",
         "",
         "| Metric | Result |",
         "|---|---|",
@@ -71,6 +72,7 @@ def main():
         f"{pct(agg['false_alarm_rate'], agg['false_alarm_rate_ci'])} |",
         f"| Mean mission time | {agg['mean_time_s']:.0f} s |",
         f"| Mean propellant used | {agg['mean_propellant_pct']:.1f}% |",
+        f"| Re-inspections per mission | {agg['mean_reinspections']:.2f} |",
         f"| Min clearance (worst mission) | {agg['min_clearance_m']:.2f} m |",
         "",
         "| Anomaly type | Injected | Found | Correct type |",

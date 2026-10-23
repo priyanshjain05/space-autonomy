@@ -4,31 +4,55 @@
     perception  line the digital twin up with the camera (registration),
                 then compare the two
     world model what the robot believes about each component
+    active      when a look is inconclusive, go and look again from elsewhere (M7)
 
 The harness talks to the agent through three things only: command(state)
 returns thruster commands, `image_request` says "I want a picture now",
 and on_image(observation, state) delivers it.
 """
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 
+from ..controllers.pose_controller import PoseController
 from ..core.types import Observation, RobotState, VehicleSpec, Wrench
 from ..perception.calibration import ConfidenceModel, features
 from ..perception.change_detection import UNOBSERVABLE, Thresholds, assess
 from ..perception.reference import ReferenceRenderer
 from ..perception.registration import align_image, refine_camera_pose, warp_view
-from ..planning.inspection_planner import fixed_route_inspector
+from ..planning.inspection_planner import InspectionPlanner, vehicle_margin
 from ..planning.sequencer import LegSequencer
 from .world_model import WorldModel
+
+
+@dataclass(frozen=True)
+class ActiveInspection:
+    """Look again when unsure (M7).
+
+    After each look the robot keeps its most confident verdict so far. If that
+    is still below `threshold`, it flies to another viewpoint (the usual view
+    direction tilted by `tilt_deg`) and looks again, up to `max_extra_looks`
+    times, before moving on. This only makes sense with a calibrated
+    confidence: the old heuristic was ~100% sure of almost everything.
+    """
+    threshold: float = 0.9
+    max_extra_looks: int = 2
+    tilt_deg: float = 30.0
+    dwell: float = 2.0   # s held at a re-inspection viewpoint
 
 
 class InspectionAgent:
     def __init__(self, sequencer: LegSequencer, reference: ReferenceRenderer, world_model: WorldModel,
                  thresholds: Thresholds = Thresholds(), registration: bool = True,
-                 confidence_model: ConfidenceModel | None = None):
+                 confidence_model: ConfidenceModel | None = None, active: ActiveInspection | None = None,
+                 planner: InspectionPlanner | None = None, targets=()):
         self.sequencer = sequencer
+        self.active = active          # None: one look per component, as planned
+        self.planner = planner        # needed for active inspection: plans the detours
+        self.targets = {t.name: t for t in targets}
+        self.looks = {}               # component -> every assessment so far
+        self._viewpoints = {}         # component -> viewpoints already used
         self.registration = registration
         self.confidence_model = confidence_model  # None: keep the heuristic confidence
         self.reference = reference
@@ -57,7 +81,7 @@ class InspectionAgent:
         wrench = self.sequencer.command(state)
         for ev in self.sequencer.pop_events():
             self._events.append(ev)
-            if ev["event"] == "arrived" and self.sequencer.leg.kind == "inspect":
+            if ev["event"] == "arrived" and self.sequencer.leg.kind in ("inspect", "reinspect"):
                 self.image_request = ev["leg"]
         return wrench
 
@@ -81,10 +105,36 @@ class InspectionAgent:
         event.update(result=a.kind, heuristic_confidence=round(a.confidence, 4), features=f)
         if self.confidence_model is not None and a.kind != UNOBSERVABLE:
             a = replace(a, confidence=self.confidence_model.predict(f, a.kind))
-        self.world_model.update(a)
         self.last = (obs, ref, a)
-        event["confidence"] = round(a.confidence, 4)
+
+        # Fuse: of all the looks at this component, believe the most confident one. With a calibrated
+        # confidence, "most confident" means "most likely right", so this is a fair comparison.
+        looks = self.looks.setdefault(name, [])
+        looks.append(a)
+        best = max(looks, key=lambda x: x.confidence)
+        self.world_model.update(best, observations=len(looks))
+        event.update(confidence=round(a.confidence, 4), look=len(looks), believed=best.kind,
+                     believed_confidence=round(best.confidence, 4))
         self._events.append(event)
+
+        act = self.active
+        if act is not None and best.confidence < act.threshold and len(looks) <= act.max_extra_looks:
+            self._look_again(name, state.t)
+
+    def _look_again(self, name, t):
+        """Insert a detour to another viewpoint of `name`, right after the current stop."""
+        target = self.targets[name]
+        here = np.asarray(self.sequencer.leg.waypoints[-1], float)
+        used = self._viewpoints.setdefault(name, [target.viewpoint])
+        vp = self.planner.nearest_viewpoint(target, here, tilt_deg=self.active.tilt_deg, avoid=used)
+        if vp is None:
+            self._events.append({"t": round(t, 3), "event": "reinspect_unavailable", "leg": name})
+            return
+        used.append(vp)
+        leg = self.planner.inspect_leg(target, vp, here, dwell=self.active.dwell, kind="reinspect")
+        self.sequencer.detour(leg, lambda old, start: replace(old, waypoints=self.planner.path(start, old.waypoints[-1])))
+        self._events.append({"t": round(t, 3), "event": "reinspect_planned", "leg": name,
+                             "viewpoint": np.round(vp, 3).tolist()})
 
     def _register(self, obs, ref, state):
         """Two-stage alignment of the twin to the camera: 3D (depth ICP), then 2D (image outline)."""
@@ -107,13 +157,17 @@ class InspectionAgent:
 
 
 def make_inspection_agent(vehicle: VehicleSpec, nominal, home, order, registration=True,
-                          calibrated=True) -> InspectionAgent:
-    """Baseline 1 + perception: fixed route, model-based change detection at every stop.
+                          calibrated=True, active=True) -> InspectionAgent:
+    """Fixed route + model-based change detection at every stop.
 
-    calibrated: use the learned confidence model (perception/confidence_model.json) if it exists.
-    It was trained on the registered pipeline, so it's only used with registration on.
+    calibrated  use the learned confidence model (perception/confidence_model.json) if it exists.
+                It was trained on the registered pipeline, so it's only used with registration on.
+    active      look again from another viewpoint when unsure (needs the calibrated model).
     """
-    seq = fixed_route_inspector(vehicle, nominal.targets(), nominal.obstacles(), home, order=order)
+    planner = InspectionPlanner(nominal.obstacles(), vehicle_margin(vehicle))
+    seq = LegSequencer(planner.fixed_route(nominal.targets(), home, order), PoseController(vehicle))
     model = ConfidenceModel.load() if calibrated and registration else None
     return InspectionAgent(seq, ReferenceRenderer(vehicle, nominal), WorldModel(order),
-                           registration=registration, confidence_model=model)
+                           registration=registration, confidence_model=model,
+                           active=ActiveInspection() if active and model is not None else None,
+                           planner=planner, targets=nominal.targets())

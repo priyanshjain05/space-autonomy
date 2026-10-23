@@ -40,6 +40,7 @@ def main():
     ap.add_argument("--nav-att-deg", type=float, default=0.0, help="navigation attitude error, deg per axis")
     ap.add_argument("--sun-deg", type=float, default=0.0, help="error in the sun direction the twin assumes")
     ap.add_argument("--no-registration", action="store_true", help="compare against the unaligned twin")
+    ap.add_argument("--passive", action="store_true", help="one look per component, no re-inspection")
     ap.add_argument("--out", default=None, help="output folder (default results/<scenario>)")
     ap.add_argument("--gif", action="store_true", help="record mission.gif")
     ap.add_argument("--viewer", action="store_true", help="live 3D viewer (run with mjpython on macOS)")
@@ -49,7 +50,8 @@ def main():
     sc = nominal() if args.clean else showcase() if args.showcase else with_anomalies(args.seed)
     sc = replace(sc, conditions=Conditions(args.nav_pos_cm / 100, args.nav_att_deg, args.sun_deg))
     sim = SpaceSim(sc.vehicle, sc.world, start_pos=sc.home, sun_dir=sc.conditions.sun_dir(sc.seed))
-    agent = make_inspection_agent(sc.vehicle, sc.spacecraft, sc.home, sc.route, registration=not args.no_registration)
+    agent = make_inspection_agent(sc.vehicle, sc.spacecraft, sc.home, sc.route, registration=not args.no_registration,
+                                  active=not args.passive)
     camera = OnboardCamera(sim, seed=sc.seed)
     out = Path(args.out or f"results/{sc.name}")
     (out / "views").mkdir(parents=True, exist_ok=True)
@@ -102,6 +104,8 @@ def main():
     for e in result.events:
         if e["event"] == "assessed":
             print(f"t={e['t']:7.1f}s  looked at {e['leg']:<14} -> {e['result']} ({e['confidence']:.0%})")
+        elif e["event"] == "reinspect_planned":
+            print(f"t={e['t']:7.1f}s  not sure about {e['leg']}: going to look again from {e['viewpoint']}")
     print()
     print(wm_text)
     print()
