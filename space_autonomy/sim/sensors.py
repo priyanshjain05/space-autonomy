@@ -7,7 +7,7 @@ import numpy as np
 
 from ..core.rotations import quat_from_axis_angle, quat_mul
 from ..core.types import Observation, RobotState
-from .render import render_rgbd
+from .render import close_renderer, render_rgbd
 
 
 class NavigationError:
@@ -64,3 +64,6 @@ class OnboardCamera:
         rgb = rgb / 255.0 + self.rng.normal(0, self.rgb_noise, rgb.shape)
         depth = depth + self.rng.normal(0, self.depth_noise, depth.shape).astype(np.float32)
         return Observation((np.clip(rgb, 0, 1) * 255).astype(np.uint8), depth)
+
+    def __del__(self):
+        close_renderer(self.renderer)

@@ -4,6 +4,21 @@ import mujoco
 import numpy as np
 
 
+def close_renderer(renderer):
+    """Free a MuJoCo renderer's GPU resources inside its *own* OpenGL context.
+
+    mujoco.Renderer.close() (also run when it's garbage-collected) frees its
+    framebuffers in whatever context is current. With several renderers alive,
+    that can be another renderer's context, whose buffers then get deleted
+    instead and it renders garbage. Making the owner's context current first
+    avoids that. (Reaches into two private attributes of mujoco.Renderer.)
+    """
+    ctx = getattr(renderer, "_gl_context", None)
+    if ctx is not None and getattr(renderer, "_mjr_context", None) is not None:
+        ctx.make_current()
+    renderer.close()
+
+
 class SceneRenderer:
     def __init__(self, sim, width=640, height=480):
         self.sim = sim
@@ -21,7 +36,10 @@ class SceneRenderer:
         return self.renderer.render()
 
     def close(self):
-        self.renderer.close()
+        close_renderer(self.renderer)
+
+    def __del__(self):
+        self.close()
 
 
 def render_rgbd(renderer, data, camera):

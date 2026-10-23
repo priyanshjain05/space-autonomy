@@ -7,13 +7,14 @@ and the robot's own pose estimate. Any renderer that can draw the nominal CAD
 model (pyrender, Blender, Isaac Sim) could stand in for it.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import mujoco
 import numpy as np
 
+from ..core.rotations import mat_to_quat, quat_to_mat
 from ..core.types import RobotState, VehicleSpec
-from ..sim.render import render_geom_ids, render_rgbd
+from ..sim.render import close_renderer, render_geom_ids, render_rgbd
 from ..sim.spacecraft import Spacecraft
 from ..sim.world import build_mjcf
 
@@ -36,6 +37,21 @@ class ReferenceRenderer:
         self._lut = np.full(self.model.ngeom + 1, -1)
         for i, name in enumerate(self.names):
             self._lut[self.model.geom(f"sc_{name}").id] = i
+        # Where the camera is mounted on the robot body.
+        mount = self.model.camera("onboard")
+        self._cam_R = quat_to_mat(mount.quat)
+        self._cam_p = mount.pos.copy()
+        self.fovy = vehicle.camera.fovy
+
+    def camera_pose(self, state: RobotState):
+        """World pose (R, t) of the onboard camera when the robot is at `state`."""
+        R = quat_to_mat(state.quat)
+        return R @ self._cam_R, state.position + R @ self._cam_p
+
+    def state_for_camera(self, cam_R, cam_t, like: RobotState) -> RobotState:
+        """The robot pose that puts the onboard camera at (cam_R, cam_t); velocities copied from `like`."""
+        R = cam_R @ self._cam_R.T
+        return replace(like, position=cam_t - R @ self._cam_p, quat=mat_to_quat(R))
 
     def render(self, state: RobotState) -> ReferenceView:
         self.data.qpos[0:3] = state.position
@@ -47,3 +63,6 @@ class ReferenceRenderer:
 
     def index(self, name: str) -> int:
         return self.names.index(name)
+
+    def __del__(self):
+        close_renderer(self.renderer)

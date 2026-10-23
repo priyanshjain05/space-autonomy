@@ -50,6 +50,9 @@ def run_mission(sim, autonomy, *, max_time, expected_targets=(), camera=None, na
             autonomy.on_image(camera.capture(), estimate(sim.state()))
 
         for ev in autonomy.pop_events():
+            if ev["event"] == "assessed":  # ground truth for scoring the robot's pose estimate, never shown to it
+                truth = sim.state()
+                ev["true_position"], ev["true_quat"] = truth.position.tolist(), truth.quat.tolist()
             events.append(ev)
             if on_event:
                 on_event(ev, sim)

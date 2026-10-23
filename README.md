@@ -22,6 +22,7 @@ evaluation harness that measures what actually happened.
 | M1 | 6-DOF free-flyer flies itself to position + attitude targets | ✅ |
 | M2–M5 | Target spacecraft (Alpha-03), onboard camera, fixed inspection route | ✅ |
 | M6 | Anomaly detection: missing, misaligned, foreign object, surface damage | ✅ |
+| M6.1 | Registration: twin aligned to the camera; robust to ~1 cm / 0.5° navigation error | ✅ |
 | M10–M11 | Randomised missions, batch scoring, noise sweep (pose + lighting) | ✅ (early) |
 | M7 | Decide what to inspect next from what's still uncertain | next |
 | M8–M9 | Unexpected obstacle, autonomous recovery | |
@@ -69,7 +70,9 @@ one — a fault on a *different* component. It is correctly not blamed on the th
 It's change detection against a **digital twin**, no machine learning:
 
 1. At each stop, the robot takes an RGB + depth image (like Astrobee's colour camera + time-of-flight sensor).
-2. It renders the *nominal* spacecraft model from its own pose: what it should be seeing.
+2. It renders the *nominal* spacecraft model from its own pose: what it should be seeing. Then it lines
+   that render up with the real image ([registration](#fix-register-the-twin-before-comparing)), which
+   matters as soon as the pose estimate isn't perfect.
 3. Per pixel, it compares depth and colour:
    - **farther** than expected → material that should be there is gone
    - **nearer** than expected → something is there that shouldn't be
@@ -141,16 +144,57 @@ Full table: `results/noise_sweep/summary.md` after running `python scripts/noise
 - **Safety is unaffected** at these levels: 0 collisions in all 656 missions.
 
 For scale: navigation good to millimetres and hundredths of a degree at a few metres is far
-beyond what a small inspector can be expected to have. Pixel-by-pixel comparison against a twin
-works only in simulation as things stand.
+beyond what a small inspector can be expected to have. Pixel-by-pixel comparison against an
+unaligned twin only works in simulation, which is what the next section fixes.
 
-**What would fix it**, in order of effort:
-1. **Register before comparing:** align the twin image to the camera image (small shift and rotation)
-   before differencing. This directly targets the edge-strip failure.
-2. **Edge tolerance:** ignore differences within a few pixels of depth edges the twin predicts.
-3. **Learned perception (M12):** a model trained on randomised renders, robust to pose and lighting by construction.
+## Fix: register the twin before comparing
 
-This sweep is now the yardstick: each of those fixes has to move these curves.
+If the images don't line up, line them up first. Registration runs at every inspection stop,
+before the comparison, in two stages:
+
+1. **3D (depth ICP):** the depth image and the twin's depth are the same surface seen from two
+   slightly different places. Point-to-plane ICP finds the small rigid motion between them, which *is*
+   the navigation error as the camera sees it. The twin is re-rendered from the corrected pose.
+2. **2D (image alignment):** depth can't see sliding along a flat surface or spinning about its normal,
+   so a solar panel filling the view can stay a few pixels off. Its *outline* can see that motion:
+   Lucas–Kanade aligns the twin's picture (brightness + silhouette) to the camera's, with sub-pixel shift and rotation.
+
+Guards so alignment can't explain away a real fault:
+- the worst-fitting 20% of points, and robustly down-weighted pixels, don't steer the fit;
+- the 3D fit is coarse-to-fine: matches may be 15 cm apart at first but only 2 cm by the end, so the gap a
+  missing part leaves can't drag the answer (this was a real bug: a missing thruster pulled the fit 4 cm and
+  got the healthy thruster next to it flagged);
+- corrections bigger than plausible navigation error (10 cm, 3°, 8 px) are rejected, and if the 2D stage
+  rejects its correction after a 3D correction, the 3D one is thrown out too.
+
+Tests check every fault type is still detected after registration.
+
+Same sweep, both pipelines, identical spacecraft (1,476 missions):
+
+![registration comparison](docs/media/registration_comparison.png)
+
+| Navigation error | False alarms without registration | False alarms with registration | Faults correctly typed (without → with) |
+|---|---|---|---|
+| Position 0.5 cm | 32% | 1% | 98% → 100% |
+| Position 1 cm | 65% | **0%** | 84% → 100% |
+| Position 2 cm | 90% | 12% | 72% → 98% |
+| Attitude 0.25° | 44% | **0%** | 89% → 100% |
+| Attitude 0.5° | 73% | **2%** | 80% → 100% |
+| Attitude 1° | 91% | 14% | 69% → 96% |
+
+- **Tolerance went up roughly 5–10×.** To keep false alarms at a few percent, the detector used to need
+  under 2.5 mm and about 0.05° of navigation accuracy. With registration it holds to about 1 cm and 0.5°.
+- **Registration also measures the navigation error.** At 0.5° attitude error (median 0.72° per view),
+  the registered pose is off by a median 0.11°. At 1 cm position error (median 1.55 cm), it's off by 0.31 cm.
+  The spacecraft itself becomes a navigation reference, a first step toward model-based relative navigation.
+- **It still breaks, and the sweep shows where.** At 4–8 cm or 2°, more and more corrections exceed the
+  plausibility bounds and get rejected (image alignment accepted on only 39–44% of views at the worst levels),
+  so the unaligned comparison comes back. That's the guard doing its job; bigger errors need a coarse
+  global search first.
+- **It does nothing for lighting**, as expected: sun error is a shading problem, not an alignment problem.
+  Both pipelines start false-alarming at 20°. That's next in line for the colour comparison.
+- **Cost:** about 0.35 s of extra compute per inspection view (a second render + both alignment stages),
+  roughly 4× slower missions in the batch runner.
 
 ## Quick start
 
@@ -168,8 +212,8 @@ python scripts/run_mission.py --seed 7       # a random damaged spacecraft
 python scripts/run_mission.py --clean        # undamaged spacecraft
 python scripts/batch_eval.py --runs 100      # many random missions -> results/batch/summary.md
 python scripts/batch_eval.py --runs 100 --nav-att-deg 0.25   # ...with navigation error (also --nav-pos-cm, --sun-deg)
-python scripts/noise_sweep.py                # degradation curves -> results/noise_sweep/
-python scripts/run_mission.py --showcase --nav-att-deg 0.5   # see what a false alarm looks like
+python scripts/noise_sweep.py                # degradation curves, with vs without registration (~18 min)
+python scripts/run_mission.py --showcase --nav-att-deg 0.5 --no-registration   # see what a false alarm looks like
 mjpython scripts/run_mission.py --viewer     # watch live (macOS needs `mjpython`, installed with MuJoCo)
 pytest
 ```
@@ -211,6 +255,7 @@ too, but only as a renderer for the *nominal* model; any renderer would do.)
 | [`planning/paths.py`](space_autonomy/planning/paths.py) | Fly straight if it's safe; otherwise back out to a keep-out sphere, go around it, come back in. |
 | [`planning/sequencer.py`](space_autonomy/planning/sequencer.py) | Executes legs: fly through waypoints, settle, point the camera, hold, next. |
 | [`perception/reference.py`](space_autonomy/perception/reference.py) | Digital twin: renders the nominal spacecraft from the robot's pose (colour, depth, which-component-is-where). |
+| [`perception/registration.py`](space_autonomy/perception/registration.py) | Lines the twin up with the camera: point-to-plane ICP on depth, then Lucas–Kanade on the image. |
 | [`perception/change_detection.py`](space_autonomy/perception/change_detection.py) | Compares the real and expected images and names the anomaly. |
 | [`autonomy/agent.py`](space_autonomy/autonomy/agent.py), [`world_model.py`](space_autonomy/autonomy/world_model.py) | Ties planning, control and perception together; keeps the robot's beliefs. |
 | [`evaluation/`](space_autonomy/evaluation/) | Mission harness, anomaly scoring, parallel batch runner with confidence intervals, reports, plots. |
@@ -240,6 +285,7 @@ too, but only as a renderer for the *nominal* model; any renderer would do.)
   With damage, worst-case clearance drops from 0.45 m to 0.32 m. That's safe, but only by luck,
   and it's exactly the M8 problem.
 - Each component is judged from a single view; confidences are heuristic, not calibrated.
+- Registration corrects the pose used for *perception only*; it isn't fed back into navigation yet.
 
 ## Repository layout
 
@@ -261,8 +307,9 @@ results/         run outputs (git-ignored)
 
 ## What's next
 
-1. **Make perception survive pose error:** register the twin to the camera image before comparing,
-   then re-run the noise sweep to show the curves move.
+1. **Calibrated confidence:** wrong verdicts still come out at 100%. Use registration quality
+   (residual misfit, whether it was accepted) and the evidence size to produce a confidence that
+   actually tracks accuracy, and measure that on the sweep.
 2. **M7, active inspection:** when a verdict is uncertain, choose another viewpoint instead of moving on.
-   This needs calibrated confidence first.
-3. **M8/M9, unexpected obstacle and recovery:** debris drifts into the path; the robot stops, re-plans and still finishes.
+3. **Lighting-robust comparison:** compare shading-invariant features (or relight the twin) so sun error stops causing false surface damage.
+4. **M8/M9, unexpected obstacle and recovery:** debris drifts into the path; the robot stops, re-plans and still finishes.

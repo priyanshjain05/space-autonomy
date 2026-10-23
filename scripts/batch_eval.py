@@ -27,6 +27,7 @@ def main():
     ap.add_argument("--nav-pos-cm", type=float, default=0.0, help="navigation position error, cm per axis")
     ap.add_argument("--nav-att-deg", type=float, default=0.0, help="navigation attitude error, deg per axis")
     ap.add_argument("--sun-deg", type=float, default=0.0, help="error in the sun direction the twin assumes")
+    ap.add_argument("--no-registration", action="store_true", help="compare against the unaligned twin")
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--out", default="results/batch")
     args = ap.parse_args()
@@ -39,7 +40,8 @@ def main():
                  [nominal()] + [with_anomalies(args.first_seed + i) for i in range(args.runs)]]
     t0 = time.time()
     summaries = run_many(scenarios, args.workers,
-                         lambda i, n: print(f"\r{i}/{n} missions", end="", flush=True))
+                         lambda i, n: print(f"\r{i}/{n} missions", end="", flush=True),
+                         registration=not args.no_registration)
     print(f"  ({time.time() - t0:.0f} s)\n")
 
     agg = aggregate(summaries, len(nominal().route))
@@ -56,7 +58,8 @@ def main():
         "# Batch evaluation: fixed-route baseline + model-based change detection",
         "",
         f"{agg['missions']} missions ({args.runs} randomised + 1 clean), seeds "
-        f"{args.first_seed}-{args.first_seed + args.runs - 1}, conditions: {cond.label()}",
+        f"{args.first_seed}-{args.first_seed + args.runs - 1}, conditions: {cond.label()}, "
+        f"registration {'off' if args.no_registration else 'on'}",
         "",
         "| Metric | Result |",
         "|---|---|",

@@ -9,17 +9,18 @@ from multiprocessing import get_context
 import numpy as np
 
 from ..autonomy.agent import make_inspection_agent
+from ..core.rotations import quat_angle
 from ..sim.sensors import OnboardCamera
 from ..sim.world import SpaceSim
 from .anomaly_scoring import score_anomalies
 from .harness import run_mission
 
 
-def run_scenario(sc) -> dict:
+def run_scenario(sc, registration=True) -> dict:
     """One full mission under the scenario's conditions -> flat summary dict."""
     c = sc.conditions
     sim = SpaceSim(sc.vehicle, sc.world, start_pos=sc.home, sun_dir=c.sun_dir(sc.seed))
-    agent = make_inspection_agent(sc.vehicle, sc.spacecraft, sc.home, sc.route)
+    agent = make_inspection_agent(sc.vehicle, sc.spacecraft, sc.home, sc.route, registration=registration)
     result = run_mission(sim, agent, max_time=sc.max_time, expected_targets=sc.route,
                          camera=OnboardCamera(sim, seed=sc.seed), nav=c.navigation(sc.seed),
                          log_hz=2.0, name=sc.name)
@@ -27,24 +28,49 @@ def run_scenario(sc) -> dict:
     s.update(score_anomalies(agent.world_model, sc.anomalies, sc.route))
     s.update(asdict(c))
     s["seed"] = sc.seed
+    s["registration"] = registration
+    s["pose_errors"] = pose_errors(result.events)
     s["false_alarm_kinds"] = [b.kind for n, b in agent.world_model.beliefs.items()
                               if b.kind and n not in {a.component for a in sc.anomalies}]
     return s
 
 
-def run_many(scenarios, workers=None, progress=None) -> list[dict]:
+def pose_errors(events) -> list[dict]:
+    """Per inspection: how far the navigation estimate (and the registered pose) were from the truth."""
+    out = []
+    for e in events:
+        if e["event"] != "assessed" or "true_position" not in e:
+            continue
+        tp, tq = np.array(e["true_position"]), np.array(e["true_quat"])
+        row = {"est_pos_m": float(np.linalg.norm(np.array(e["est_position"]) - tp)),
+               "est_att_deg": float(np.degrees(quat_angle(e["est_quat"], tq)))}
+        if "refined_position" in e:
+            row["reg_pos_m"] = float(np.linalg.norm(np.array(e["refined_position"]) - tp))
+            row["reg_att_deg"] = float(np.degrees(quat_angle(e["refined_quat"], tq)))
+            row["icp_accepted"] = e["icp_accepted"]
+            row["image_accepted"] = e["image_accepted"]
+        out.append(row)
+    return out
+
+
+def run_many(scenarios, workers=None, progress=None, registration=True) -> list[dict]:
     """Missions in parallel processes, results in input order."""
     workers = workers or max(1, (os.cpu_count() or 2) - 2)
     if workers == 1:
         out = []
         for i, sc in enumerate(scenarios):
-            out.append(run_scenario(sc))
+            out.append(run_scenario(sc, registration))
             if progress:
                 progress(i + 1, len(scenarios))
         return out
+    # One maths thread per worker: the parallelism is already across processes, and letting each
+    # worker's linear algebra spawn its own threads too oversubscribes the CPU (~4x slower here).
+    # Workers inherit the environment when they start, before they import NumPy.
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
     # "spawn" gives each worker a clean process, so each gets its own rendering context.
     with ProcessPoolExecutor(workers, mp_context=get_context("spawn")) as pool:
-        futures = [pool.submit(run_scenario, sc) for sc in scenarios]
+        futures = [pool.submit(run_scenario, sc, registration) for sc in scenarios]
         out = []
         for i, f in enumerate(futures):
             out.append(f.result())
@@ -87,4 +113,16 @@ def aggregate(summaries, n_targets) -> dict:
         "mean_propellant_pct": float(np.mean([s["propellant_used_pct"] for s in summaries])),
         "min_clearance_m": float(min(s["min_clearance_m"] for s in summaries)),
         "false_alarm_kinds": Counter(k for s in summaries for k in s["false_alarm_kinds"]),
+        **_pose_error_medians(summaries),
     }
+
+
+def _pose_error_medians(summaries) -> dict:
+    rows = [r for s in summaries for r in s.get("pose_errors", [])]
+    keys = ("est_pos_m", "est_att_deg", "reg_pos_m", "reg_att_deg")
+    out = {f"median_{k}": float(np.median([r[k] for r in rows if k in r])) if any(k in r for r in rows)
+           else np.nan for k in keys}
+    if rows and "icp_accepted" in rows[0]:
+        out["icp_accept_rate"] = float(np.mean([r["icp_accepted"] for r in rows]))
+        out["image_accept_rate"] = float(np.mean([r["image_accepted"] for r in rows]))
+    return out
