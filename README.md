@@ -26,7 +26,7 @@ evaluation harness that measures what actually happened.
 | M6.2 | Calibrated confidence, learned from simulated missions and measured on held-out ones | ✅ |
 | M10–M11 | Randomised missions, batch scoring, noise sweep (pose + lighting) | ✅ (early) |
 | M7 | Active inspection: look again from another viewpoint when unsure | ✅ |
-| M8–M9 | Unexpected obstacle, autonomous recovery | |
+| M8–M9 | Unexpected debris: detect, stop, replan, finish the mission | ✅ |
 | M12+ | Learned perception / planning, ROS 2, Isaac Sim | |
 
 ## M6 result: anomaly detection
@@ -300,6 +300,68 @@ What looking again actually did, over every component it looked at more than onc
   calibration error 0.010 on first looks vs 0.059 on re-looks (AUROC 0.991 vs 0.927). Re-looks are only right
   49% of the time, because they only happen in hard cases, and their mean confidence (0.46) tracks that.
 
+## M8/M9: debris in the way
+
+A loose piece of debris (a 0.25 m sphere) drifts into the robot's path. The robot has to notice it, stop, work out
+where it's going, find a safe way around, and still finish the inspection.
+
+![debris encounter](docs/media/debris_encounter.gif)
+
+*The same encounter flown twice. Left: the robot ignores loose objects and flies into the debris (grey sphere, white
+trail). Right: it detects the debris 20 s before the predicted collision, holds position, waits 11 s for it to pass,
+and carries on. 1.25 m of clearance kept, 15 s added to the mission.*
+
+**The test is adversarial on purpose.** The harness flies each mission once with no debris and records the trajectory.
+It then picks a moment and launches the debris so that it arrives exactly where the robot will be at that moment,
+crossing its path, or straight at it while it's holding still to inspect. The harness may use privileged knowledge;
+the robot only gets its sensor. **Ignoring the debris, the robot was hit in all 400 encounters.**
+
+**The robot's side** ([`autonomy/hazards.py`](space_autonomy/autonomy/hazards.py)), following the recovery loop:
+
+1. **Sense:** a short-range hazard sensor (think lidar with a tracker) reports loose objects within range, 5 times a
+   second, with 2 cm of noise. Velocity is estimated by fitting a straight line through the last few seconds of sightings.
+2. **Predict:** every 0.5 s, project the object forward (constant velocity: it's drifting) and the robot along its
+   plan, *including* the time it will hold still at the next viewpoint. If the gap between them would drop below
+   **0.5 m**, it's a conflict.
+3. **Stop and re-observe:** hold position for 2 s so the velocity estimate settles.
+4. **Generate options:** wait here until resuming is safe, or sidestep through one of 16 points off to the side of
+   the object's track and then rejoin the route (planned around the spacecraft as usual).
+5. **Choose:** the cheapest option, in extra seconds, that keeps the 0.5 m gap the whole way. If none does, take the
+   one with the biggest gap, log `no_safe_option`, and reconsider in a second.
+6. **Execute, keep watching, resume:** monitoring never stops, so a wrong prediction triggers another replan.
+
+400 encounters (40 per level), each flown both ways on the same spacecraft, seeds 6000+:
+
+![hazard sweep](docs/media/hazard_sweep.png)
+
+| Condition | Hit: ignoring → avoiding | Closest approach (median) | Warning before conflict (median) | Extra time | Extra propellant |
+|---|---|---|---|---|---|
+| Debris 0.05 m/s, sensor 4 m | 100% → **0%** | 0.99 m | 34 s | +39 s | +7.7 pts |
+| Debris 0.15 m/s, sensor 4 m | 100% → **0%** | 0.82 m | 20 s | +20 s | +6.8 pts |
+| Debris 0.3 m/s, sensor 4 m | 100% → **0%** | 0.84 m | 12 s | +13 s | +6.4 pts |
+| Sensor 3 m (debris 0.15 m/s) | 100% → **0%** | 0.77 m | 15 s | +18 s | +6.6 pts |
+| Sensor 2 m | 100% → 5% | 0.76 m | 10 s | +19 s | +8.8 pts |
+| Sensor 1.5 m | 100% → 30% | 0.47 m | 7 s | +29 s | +12.6 pts |
+| Sensor 1 m | 100% → 45% | 0.02 m | 5 s | +33 s | +13.7 pts |
+
+- **With a 3 m+ sensor, no debris speed tested got through.** 0 hits in 280 encounters, and every mission finished
+  every inspection. The 0.5 m gap was kept in 273 of them; the other 7 came closer (10–34 cm) without touching.
+  Those near misses are what to look at next: the prediction assumes a fixed robot speed and was occasionally optimistic.
+- **Sensor range is what matters, and the sweep finds the floor:** below ~2 m the warning drops to 5–7 s and hits
+  come back. **24 of the 30 short-range hits came while the robot was holding still at a viewpoint**: from rest, it
+  spends 2 s re-observing and then can't accelerate out of the way in time. The re-observe step that makes decisions
+  better with plenty of warning is what costs it at close range. Fix: skip it when the conflict is seconds away.
+- **Slow debris costs the most time** (+39 s at 0.05 m/s): there's no getting around something that takes a long
+  time to get out of the way. Fast debris is over quickly.
+- **Waiting and detouring are both used**, about equally (673 waits, 675 detours), depending on the geometry.
+- **Inspection quality survives:** 699/720 faults correctly typed while avoiding vs. 700/720 with no debris at all.
+  Debris drifting through the camera view occasionally gets reported as a "foreign object" on a healthy part
+  (5 false alarms over 400 missions), which, strictly, it is, but only for a moment.
+- 0 contacts with the spacecraft in all 1,200 missions.
+
+What's simplified: one object at a time, perfectly spherical, drifting at constant velocity; a sensor with no
+occlusion or missed detections; and the robot's own motion predicted at a fixed speed.
+
 ## Quick start
 
 macOS / Linux, Python 3.10+:
@@ -318,6 +380,8 @@ python scripts/batch_eval.py --runs 100      # many random missions -> results/b
 python scripts/batch_eval.py --runs 100 --nav-att-deg 0.25   # ...with navigation error (also --nav-pos-cm, --sun-deg)
 python scripts/noise_sweep.py                # degradation curves for all three pipelines (~40 min)
 python scripts/relook_analysis.py            # what re-inspection rescued / spoiled (after a sweep)
+python scripts/run_hazard.py --gif           # one debris encounter, flown ignoring vs. avoiding it
+python scripts/hazard_sweep.py               # 400 encounters across debris speed and sensor range (~25 min)
 python scripts/calibrate.py                  # refit + measure the confidence model (needs two sweeps; see the script)
 python scripts/run_mission.py --showcase --nav-att-deg 0.5 --no-registration   # see what a false alarm looks like
 python scripts/run_mission.py --showcase --nav-att-deg 1.5   # watch it doubt the antenna and look again (--passive to compare)
@@ -357,6 +421,8 @@ too, but only as a renderer for the *nominal* model; any renderer would do.)
 | [`sim/spacecraft.py`](space_autonomy/sim/spacecraft.py) | A spacecraft is a list of primitive components. The same list generates the MuJoCo geometry *and* the obstacles + inspection targets the autonomy plans with. |
 | [`sim/anomalies.py`](space_autonomy/sim/anomalies.py) | Damages a spacecraft: removes, tilts, sticks debris on, or scorches components. Keeps the ground truth. |
 | [`sim/sensors.py`](space_autonomy/sim/sensors.py) | RGB-D camera with Gaussian noise (2% colour, 5 mm depth); slowly drifting navigation error. |
+| [`sim/hazards.py`](space_autonomy/sim/hazards.py) | Hazard sensor for loose objects, and the adversary that aims debris at the robot. |
+| [`autonomy/hazards.py`](space_autonomy/autonomy/hazards.py) | Tracking, conflict prediction, and the stop / re-observe / replan / resume loop. |
 | [`scenarios/conditions.py`](space_autonomy/scenarios/conditions.py) | How far reality departs from the robot's assumptions: navigation error, sun-direction error. |
 | [`controllers/pose_controller.py`](space_autonomy/controllers/pose_controller.py) | Cascaded controller: position error → desired velocity (capped at 0.25 m/s) → force. Same idea for attitude. |
 | [`planning/paths.py`](space_autonomy/planning/paths.py) | Fly straight if it's safe; otherwise back out to a keep-out sphere, go around it, come back in. |
@@ -410,7 +476,8 @@ space_autonomy/
   autonomy/      inspection agent, world model
   evaluation/    mission harness, anomaly scoring, reports, plots
   scenarios/     Alpha-03 spacecraft + scenarios (nominal, random anomalies, showcase)
-scripts/         m0_smoke, m1_goto, run_mission, batch_eval, noise_sweep, calibrate
+scripts/         m0_smoke, m1_goto, run_mission, batch_eval, noise_sweep, calibrate, relook_analysis,
+                 run_hazard, hazard_sweep
 tests/           rotations, control, perception, full missions
 docs/media/      images used in this README
 results/         run outputs (git-ignored)
@@ -425,4 +492,5 @@ results/         run outputs (git-ignored)
    causing false surface damage, and add lighting faults to the confidence model's training data.
 3. **Subtler faults:** smaller debris, partial damage, so that "nominal" verdicts can be wrong and the confidence
    model learns when to doubt them.
-4. **M8/M9, unexpected obstacle and recovery:** debris drifts into the path; the robot stops, re-plans and still finishes.
+4. **Faster hazard reflexes:** skip the re-observe pause when a conflict is seconds away, and handle several objects,
+   missed detections and occlusion in the hazard sensor.

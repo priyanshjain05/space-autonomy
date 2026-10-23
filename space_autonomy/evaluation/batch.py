@@ -2,14 +2,16 @@
 
 import os
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
-from dataclasses import asdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
+from dataclasses import asdict, replace
 from multiprocessing import get_context
 
 import numpy as np
 
 from ..autonomy.agent import make_inspection_agent
 from ..core.rotations import quat_angle
+from ..sim.hazards import DebrisInjector, HazardSensor, plan_strike
 from ..sim.sensors import OnboardCamera
 from ..sim.world import SpaceSim
 from .anomaly_scoring import score_anomalies
@@ -73,13 +75,53 @@ def pose_errors(events) -> list[dict]:
     return out
 
 
-def run_many(scenarios, workers=None, progress=None, **agent_options) -> list[dict]:
-    """Missions in parallel processes, results in input order."""
+def run_hazard(sc, speed=0.15, radius=0.25, sensor_range=4.0) -> dict:
+    """One debris encounter, flown three ways on the same spacecraft:
+
+    clean   no debris; its trajectory is what the adversary aims at
+    ignore  debris launched to hit the robot; the robot doesn't react to it
+    avoid   same debris; the robot detects it, stops, replans
+    """
+    rng = np.random.default_rng(sc.seed + 7)
+    vehicle = replace(sc.vehicle, hazard_range=sensor_range)
+
+    def fly(avoid, strike=None):
+        sim = SpaceSim(vehicle, sc.world, start_pos=sc.home, debris_radii=(radius,) if strike else ())
+        agent = make_inspection_agent(vehicle, sc.spacecraft, sc.home, sc.route, avoid=avoid)
+        result = run_mission(sim, agent, max_time=sc.max_time, expected_targets=sc.route,
+                             camera=OnboardCamera(sim, seed=sc.seed),
+                             hazard_sensor=HazardSensor(sim, seed=sc.seed) if strike else None,
+                             injector=DebrisInjector(strike) if strike else None,
+                             log_hz=10.0 if strike is None else 2.0, name=sc.name)
+        s = result.summary
+        s.update(score_anomalies(agent.world_model, sc.anomalies, sc.route))
+        s["events"] = [e for e in result.events if e["event"] in
+                       ("hazard_detected", "replanned", "resumed", "no_safe_option")]
+        return s, result
+
+    clean, clean_result = fly(avoid=False)
+    strike = plan_strike(clean_result.telemetry, sc.world.obstacles(), speed, radius, rng)
+    out = {"seed": sc.seed, "speed": speed, "radius": radius, "sensor_range": sensor_range,
+           "aim_t": strike.aim_t, "robot_moving": strike.robot_moving, "clean": clean}
+    for avoid in (False, True):
+        out["avoid" if avoid else "ignore"] = fly(avoid, strike)[0]
+    return out
+
+
+def run_hazard_job(job) -> dict:
+    """run_hazard(scenario, speed, sensor_range) as one picklable job, for run_many."""
+    sc, speed, sensor_range = job
+    return run_hazard(sc, speed=speed, sensor_range=sensor_range)
+
+
+def run_many(scenarios, workers=None, progress=None, fn=None, **options) -> list[dict]:
+    """Missions in parallel processes, results in input order. fn(scenario, **options) runs one."""
+    fn = fn or run_scenario
     workers = workers or max(1, (os.cpu_count() or 2) - 2)
     if workers == 1:
         out = []
         for i, sc in enumerate(scenarios):
-            out.append(run_scenario(sc, **agent_options))
+            out.append(fn(sc, **options))
             if progress:
                 progress(i + 1, len(scenarios))
         return out
@@ -89,14 +131,25 @@ def run_many(scenarios, workers=None, progress=None, **agent_options) -> list[di
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS"):
         os.environ.setdefault(var, "1")
     # "spawn" gives each worker a clean process, so each gets its own rendering context.
-    with ProcessPoolExecutor(workers, mp_context=get_context("spawn")) as pool:
-        futures = [pool.submit(run_scenario, sc, **agent_options) for sc in scenarios]
-        out = []
-        for i, f in enumerate(futures):
-            out.append(f.result())
-            if progress:
-                progress(i + 1, len(scenarios))
+    # If a worker dies outright (a native crash takes the whole pool down with it), start a fresh pool
+    # for the jobs that hadn't finished. Every job is deterministic from its seed, so a retry gives the
+    # same answer it would have the first time.
+    out, todo, done = [None] * len(scenarios), list(range(len(scenarios))), 0
+    for attempt in range(4):
+        with ProcessPoolExecutor(workers, mp_context=get_context("spawn")) as pool:
+            futures = {pool.submit(fn, scenarios[i], **options): i for i in todo}
+            try:
+                for f in as_completed(futures):
+                    out[futures[f]] = f.result()
+                    done += 1
+                    if progress:
+                        progress(done, len(scenarios))
+            except BrokenProcessPool:
+                todo = [i for i in todo if out[i] is None]
+                print(f"\n[run_many] a worker crashed; restarting for the {len(todo)} unfinished jobs", flush=True)
+                continue
         return out
+    raise RuntimeError(f"run_many: workers kept crashing; {len(todo)} jobs never finished")
 
 
 def wilson(k, n, z=1.96):

@@ -23,28 +23,42 @@ class MissionResult:
     events: list
 
 
-def run_mission(sim, autonomy, *, max_time, expected_targets=(), camera=None, nav=None, control_hz=20.0,
-                log_hz=10.0, on_event=None, on_tick=None, name="mission") -> MissionResult:
+def run_mission(sim, autonomy, *, max_time, expected_targets=(), camera=None, nav=None, hazard_sensor=None,
+                injector=None, control_hz=20.0, log_hz=10.0, on_event=None, on_tick=None,
+                name="mission") -> MissionResult:
     """
     camera                sensor that serves the autonomy's image requests (None: no images)
     nav                   navigation error model; the autonomy sees its estimate, not the truth (None: perfect)
+    hazard_sensor         reports loose objects near the robot to autonomy.on_detections
+    injector              launches debris at its moment (the adversary; the autonomy never sees it)
     on_event(event, sim)  called for every autonomy event (e.g. to save what the robot saw)
     on_tick(sim, rows)    called every log tick (e.g. to record video or drive a viewer)
     """
     dt = 1.0 / control_hz
     rows, events = [], []
     collisions, touching = 0, False
-    min_clear = float("inf")
+    debris_hits, touching_debris = 0, False
+    min_clear = min_debris = float("inf")
     next_log = 0.0
     start_pos = sim.state().position
 
     estimate = nav.estimate if nav is not None else (lambda s: s)
     while sim.t < max_time and not autonomy.done:
+        if injector is not None:
+            injector.update(sim)
         cmd = autonomy.command(estimate(sim.state()))
         touched = sim.step(cmd, dt)
         if touched and not touching:
             collisions += 1   # count each new contact episode once
         touching = touched
+        if sim.debris_contact and not touching_debris:
+            debris_hits += 1
+        touching_debris = sim.debris_contact
+        min_debris = min(min_debris, sim.debris_clearance())
+        if hazard_sensor is not None:
+            detections = hazard_sensor.detect()
+            if detections and hasattr(autonomy, "on_detections"):
+                autonomy.on_detections(detections)
 
         if camera is not None and getattr(autonomy, "image_request", None):
             autonomy.on_image(camera.capture(), estimate(sim.state()))
@@ -85,6 +99,10 @@ def run_mission(sim, autonomy, *, max_time, expected_targets=(), camera=None, na
         "min_clearance_m": round(min_clear, 3) if np.isfinite(min_clear) else None,
         "final_distance_from_start_m": round(float(np.linalg.norm(end_pos - start_pos)), 3),
         "human_interventions": 0,
+        "debris_collisions": debris_hits,
+        "min_debris_clearance_m": round(min_debris, 3) if np.isfinite(min_debris) else None,
+        **{f"hazard_{k}": sum(e["event"] == k for e in events)
+           for k in ("hazard_detected", "replanned", "resumed", "no_safe_option")},
     }
     return MissionResult(summary, rows, events)
 

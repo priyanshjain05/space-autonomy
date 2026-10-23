@@ -24,6 +24,7 @@ class Leg:
     transit_look_at: np.ndarray | None = None  # what to face while travelling (None: goal attitude)
     dwell: float = 0.0                # s to hold at the goal (e.g. to take images)
     kind: str = "goto"                # "inspect" | "reinspect" | "goto" | "return"
+    assessed: bool = False            # picture already taken here (a detour may bring the robot back)
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,15 @@ class LegSequencer:
 
         self._target_pos, self._target_quat = target, quat
         return self.controller.command(s, target, quat, cruise=not at_goal_wp)
+
+    def reroute(self, waypoints) -> None:
+        """Fly the current leg through new waypoints (same goal). If the robot was already at the goal,
+        it has to come back and settle again."""
+        self.leg.waypoints = list(waypoints)
+        self.wp_index = 0
+        if self.phase in ("settling", "dwell"):
+            self.phase = "transit"
+        self._goal_quat = None
 
     def detour(self, leg: Leg, replan_next) -> None:
         """Fly `leg` right after the current one, then carry on.

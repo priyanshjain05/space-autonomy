@@ -53,6 +53,15 @@ class Observation:
 
 
 @dataclass(frozen=True)
+class Detection:
+    """One sighting of an unknown object by the hazard sensor."""
+    t: float
+    track_id: int          # the sensor keeps objects apart (as a lidar tracker would)
+    position: np.ndarray   # m, world frame, noisy
+    radius: float          # m, rough size
+
+
+@dataclass(frozen=True)
 class VehicleSpec:
     """Datasheet for the free-flying inspector.
 
@@ -66,6 +75,7 @@ class VehicleSpec:
     isp: float = 60.0             # s, typical for cold-gas (nitrogen) thrusters
     propellant: float = 0.3       # kg at launch
     camera: CameraSpec = CameraSpec()
+    hazard_range: float = 4.0     # m, how far the hazard sensor sees loose objects
 
     @property
     def inertia(self) -> np.ndarray:

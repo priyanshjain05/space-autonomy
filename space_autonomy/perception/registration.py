@@ -122,7 +122,7 @@ def icp(observed, expected, normals, cfg: RegistrationConfig):
         # w . (p x n) + dt . n. Solve for the (w, dt) that cancels the residuals, least squares.
         A = np.hstack([np.cross(p, n), n])
         b = -r[keep]
-        x = np.linalg.solve(A.T @ A + cfg.damping * len(p) * np.eye(6), A.T @ b)
+        x = np.linalg.solve(np.einsum("ni,nj->ij", A, A) + cfg.damping * len(p) * np.eye(6), np.einsum("ni,n->i", A, b))
         w, dt = x[:3], x[3:]
         angle = np.linalg.norm(w)
         dR = quat_to_mat(quat_from_axis_angle(w, angle)) if angle > 0 else np.eye(3)
@@ -222,7 +222,10 @@ def align_image(obs, ref, cfg: ImageAlignConfig = ImageAlignConfig()) -> ImageAl
         c, s = np.cos(p[2]), np.sin(p[2])
         J = np.column_stack([wgx.ravel(), wgy.ravel(),
                              (wgx * (-s * x - c * y) + wgy * (c * x - s * y)).ravel()])
-        step = np.linalg.solve(J.T @ (J * wts[:, None]) + 1e-9 * np.eye(3), -(J * wts[:, None]).T @ r)
+        # einsum, not J.T @ ...: these are 300k-row products, and Accelerate's BLAS on macOS 14.4
+        # has segfaulted inside exactly this call in long batch runs. The 3x3 sums don't need BLAS.
+        Jw = J * wts[:, None]
+        step = np.linalg.solve(np.einsum("ni,nj->ij", J, Jw) + 1e-9 * np.eye(3), -np.einsum("ni,n->i", Jw, r))
         p += step
         if np.abs(step[:2]).max() < 1e-3 and abs(step[2]) < 1e-5:
             break

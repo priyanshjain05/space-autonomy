@@ -24,13 +24,16 @@ class SceneRenderer:
         self.sim = sim
         self.renderer = mujoco.Renderer(sim.model, height, width, max_geom=20000)
 
-    def render(self, camera: str, trail=None, waypoints=None) -> np.ndarray:
-        """RGB image from a named camera. Overlays are drawn only when given."""
+    def render(self, camera, trail=None, waypoints=None, extra_trails=()) -> np.ndarray:
+        """RGB image from a named camera, or a mujoco.MjvCamera. Overlays are drawn only when given.
+
+        extra_trails: [(points, rgba), ...] more polylines, e.g. a piece of debris's path.
+        """
         self.renderer.update_scene(self.sim.data, camera=camera)
         scene = self.renderer.scene
-        if trail is not None and len(trail) > 1:
-            for a, b in zip(trail[:-1], trail[1:]):
-                _add_line(scene, a, b, (1.0, 0.6, 0.2, 1.0))
+        for pts, rgba in ([(trail, (1.0, 0.6, 0.2, 1.0))] if trail is not None else []) + list(extra_trails):
+            for a, b in zip(pts[:-1], pts[1:]):
+                _add_line(scene, a, b, rgba)
         for p in waypoints if waypoints is not None else []:
             _add_sphere(scene, p, 0.06, (0.2, 1.0, 0.4, 0.9))
         return self.renderer.render()
@@ -40,6 +43,15 @@ class SceneRenderer:
 
     def __del__(self):
         self.close()
+
+
+def free_camera(lookat, distance, azimuth, elevation):
+    """A camera aimed at a point from a distance and direction (degrees), not attached to anything."""
+    cam = mujoco.MjvCamera()
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    cam.lookat[:] = lookat
+    cam.distance, cam.azimuth, cam.elevation = distance, azimuth, elevation
+    return cam
 
 
 def render_rgbd(renderer, data, camera):

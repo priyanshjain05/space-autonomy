@@ -5,6 +5,7 @@
                 then compare the two
     world model what the robot believes about each component
     active      when a look is inconclusive, go and look again from elsewhere (M7)
+    hazards     when loose debris is about to get in the way: stop, look, replan (M8/M9)
 
 The harness talks to the agent through three things only: command(state)
 returns thruster commands, `image_request` says "I want a picture now",
@@ -23,6 +24,7 @@ from ..perception.reference import ReferenceRenderer
 from ..perception.registration import align_image, refine_camera_pose, warp_view
 from ..planning.inspection_planner import InspectionPlanner, vehicle_margin
 from ..planning.sequencer import LegSequencer
+from .hazards import HazardResponder
 from .world_model import WorldModel
 
 
@@ -46,8 +48,9 @@ class InspectionAgent:
     def __init__(self, sequencer: LegSequencer, reference: ReferenceRenderer, world_model: WorldModel,
                  thresholds: Thresholds = Thresholds(), registration: bool = True,
                  confidence_model: ConfidenceModel | None = None, active: ActiveInspection | None = None,
-                 planner: InspectionPlanner | None = None, targets=()):
+                 planner: InspectionPlanner | None = None, targets=(), hazards: HazardResponder | None = None):
         self.sequencer = sequencer
+        self.hazards = hazards        # None: ignore loose objects entirely
         self.active = active          # None: one look per component, as planned
         self.planner = planner        # needed for active inspection: plans the detours
         self.targets = {t.name: t for t in targets}
@@ -77,11 +80,23 @@ class InspectionAgent:
         ev, self._events = self._events, []
         return ev
 
+    def on_detections(self, detections):
+        if self.hazards is not None:
+            self.hazards.on_detections(detections)
+
     def command(self, state: RobotState) -> Wrench:
+        if self.hazards is not None:
+            hold = self.hazards.step(state, self.sequencer)
+            self._events += self.hazards.events
+            self.hazards.events.clear()
+            if hold is not None:  # the hazard responder has the controls: hold position
+                return self.sequencer.controller.command(state, *hold)
         wrench = self.sequencer.command(state)
         for ev in self.sequencer.pop_events():
             self._events.append(ev)
-            if ev["event"] == "arrived" and self.sequencer.leg.kind in ("inspect", "reinspect"):
+            leg = self.sequencer.leg
+            if ev["event"] == "arrived" and leg.kind in ("inspect", "reinspect") and not leg.assessed:
+                leg.assessed = True
                 self.image_request = ev["leg"]
         return wrench
 
@@ -157,12 +172,13 @@ class InspectionAgent:
 
 
 def make_inspection_agent(vehicle: VehicleSpec, nominal, home, order, registration=True,
-                          calibrated=True, active=True) -> InspectionAgent:
+                          calibrated=True, active=True, avoid=True) -> InspectionAgent:
     """Fixed route + model-based change detection at every stop.
 
     calibrated  use the learned confidence model (perception/confidence_model.json) if it exists.
                 It was trained on the registered pipeline, so it's only used with registration on.
     active      look again from another viewpoint when unsure (needs the calibrated model).
+    avoid       react to loose debris reported by the hazard sensor.
     """
     planner = InspectionPlanner(nominal.obstacles(), vehicle_margin(vehicle))
     seq = LegSequencer(planner.fixed_route(nominal.targets(), home, order), PoseController(vehicle))
@@ -170,4 +186,5 @@ def make_inspection_agent(vehicle: VehicleSpec, nominal, home, order, registrati
     return InspectionAgent(seq, ReferenceRenderer(vehicle, nominal), WorldModel(order),
                            registration=registration, confidence_model=model,
                            active=ActiveInspection() if active and model is not None else None,
-                           planner=planner, targets=nominal.targets())
+                           planner=planner, targets=nominal.targets(),
+                           hazards=HazardResponder(planner, vehicle.bounding_radius) if avoid else None)
