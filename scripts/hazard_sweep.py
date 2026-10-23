@@ -8,6 +8,8 @@ the robot ignoring loose objects, once with detect-stop-replan. Two sweeps:
     python scripts/hazard_sweep.py               # 40 encounters per level, ~25 min on 11 cores
     python scripts/hazard_sweep.py --runs 5      # quick look
     python scripts/hazard_sweep.py --replot
+    python scripts/hazard_sweep.py --compare results/hazard_sweep_v1   # overlay an earlier run's "avoid" line
+    python scripts/hazard_sweep.py --no-urgent --only-range 1,1.5,2 --out results/hazard_ablation
 """
 
 import argparse
@@ -22,6 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from space_autonomy.autonomy.hazards import HazardConfig
 from space_autonomy.evaluation.batch import run_hazard_job, run_many, wilson
 from space_autonomy.scenarios.alpha03 import with_anomalies
 
@@ -54,21 +57,38 @@ def main():
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--out", default="results/hazard_sweep")
     ap.add_argument("--replot", action="store_true")
+    ap.add_argument("--compare", default=None, help="folder of an earlier run to overlay (its avoid pipeline)")
+    ap.add_argument("--compare-label", default="Avoids, before the fix")
+    ap.add_argument("--no-urgent", action="store_true", help="ablation: always stop and look first")
+    ap.add_argument("--only-range", default=None, help="run just these sensor ranges, e.g. 1,1.5,2")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     if not args.replot:
         base = [with_anomalies(args.first_seed + i) for i in range(args.runs)]
-        jobs = [(sc, speed, rng_m) for speed, rng_m in conditions() for sc in base]  # one pool for all of them
+        conds = conditions()
+        if args.only_range:
+            keep = [float(x) for x in args.only_range.split(",")]
+            conds = [(DEFAULT_SPEED, r) for r in keep]
+        config = (HazardConfig(urgent=0.0),) if args.no_urgent else ()
+        jobs = [(sc, speed, rng_m, *config) for speed, rng_m in conds for sc in base]  # one pool for all of them
         t0 = time.time()
         results = run_many(jobs, args.workers, lambda i, n: print(f"\r{i}/{n} encounters", end="", flush=True),
                            fn=run_hazard_job)
         print(f"\n{len(results)} encounters x 3 missions in {time.time() - t0:.0f} s")
         (out / "encounters.json").write_text(json.dumps(results, indent=1, default=float))
     results = json.loads((out / "encounters.json").read_text())
+    if args.only_range:
+        print(table(summarise(results, only_range=True), results))
+        return
 
     rows = summarise(results)
+    if args.compare:
+        before = json.loads((Path(args.compare) / "encounters.json").read_text())
+        rows += [dict(r, pipeline="before") for r in summarise(before) if r["pipeline"] == "avoid"]
+        SERIES.append(("before", args.compare_label, "#1baf7a", "s"))
+        SERIES[0] = ("avoid", "Avoids, after the fix", *SERIES[0][2:])
     with open(out / "hazard_sweep.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0]))
         w.writeheader()
@@ -80,13 +100,17 @@ def main():
     print(f"\nOutputs in {out}/")
 
 
-def summarise(results):
+def summarise(results, only_range=False):
     rows = []
     for f, (_, _, levels) in FACTORS.items():
+        if only_range and f != "range":
+            continue
         for v in levels:
             speed, rng_m = (v, DEFAULT_RANGE) if f == "speed" else (DEFAULT_SPEED, v)
             enc = [r for r in results if np.isclose(r["speed"], speed) and np.isclose(r["sensor_range"], rng_m)]
-            for pipe, *_ in SERIES:
+            if not enc:
+                continue
+            for pipe in ("avoid", "ignore"):
                 ss = [r[pipe] for r in enc]
                 hit = sum(s["debris_collisions"] > 0 for s in ss)
                 gaps = np.array([s["min_debris_clearance_m"] for s in ss], float)
@@ -152,12 +176,12 @@ def plot(rows, path, runs):
                 ax.set_xlabel(xlabel, color=MUTED)
             if col == 0:
                 ax.set_ylabel(ylabel, color=MUTED)
-    # Direct labels on the top-left panel, where the two lines are far apart.
+    # Direct labels on the sensor-range panel at 1 m, where the lines are furthest apart.
     for pipe, label, *_ in SERIES:
-        r = next(r for r in rows if r["factor"] == "speed" and r["pipeline"] == pipe and r["level"] == 0.1)
-        # Inside the panel: under the line pinned at 100%, over the line pinned at 0%.
-        axes[0, 0].annotate(label, (1, r["collision_rate"] * 100), xytext=(0, -16 if pipe == "ignore" else 9),
-                            textcoords="offset points", ha="center", fontsize=9, color=INK)
+        r = next((r for r in rows if r["factor"] == "range" and r["pipeline"] == pipe and r["level"] == 1.0), None)
+        if r is not None:
+            axes[0, 1].annotate(label, (0, r["collision_rate"] * 100), xytext=(10, -12 if pipe == "ignore" else 4),
+                                textcoords="offset points", ha="left", fontsize=9, color=INK)
     fig.legend(*axes[0, 0].get_legend_handles_labels(), loc="upper right", ncol=2, frameon=False, fontsize=10,
                labelcolor=INK)
     fig.suptitle("Debris aimed at the robot", x=0.01, ha="left", color=INK, fontsize=14)
@@ -177,6 +201,8 @@ def table(rows, results):
                   f"| Extra time | Extra fuel (pts) | No safe option | Success: ignore → avoid |",
                   "|---|---|---|---|---|---|---|---|---|"]
         for v in levels:
+            if not any(r["factor"] == f and r["level"] == v for r in rows):
+                continue
             ig = next(r for r in rows if r["factor"] == f and r["level"] == v and r["pipeline"] == "ignore")
             av = next(r for r in rows if r["factor"] == f and r["level"] == v and r["pipeline"] == "avoid")
             lines.append(f"| {v:g} | {100 * ig['collision_rate']:.0f}% → {100 * av['collision_rate']:.0f}% | "

@@ -24,7 +24,7 @@ from ..perception.reference import ReferenceRenderer
 from ..perception.registration import align_image, refine_camera_pose, warp_view
 from ..planning.inspection_planner import InspectionPlanner, vehicle_margin
 from ..planning.sequencer import LegSequencer
-from .hazards import HazardResponder
+from .hazards import HazardConfig, HazardResponder
 from .world_model import WorldModel
 
 
@@ -172,7 +172,8 @@ class InspectionAgent:
 
 
 def make_inspection_agent(vehicle: VehicleSpec, nominal, home, order, registration=True,
-                          calibrated=True, active=True, avoid=True) -> InspectionAgent:
+                          calibrated=True, active=True, avoid=True,
+                          hazard_config: HazardConfig = HazardConfig()) -> InspectionAgent:
     """Fixed route + model-based change detection at every stop.
 
     calibrated  use the learned confidence model (perception/confidence_model.json) if it exists.
@@ -187,4 +188,4 @@ def make_inspection_agent(vehicle: VehicleSpec, nominal, home, order, registrati
                            registration=registration, confidence_model=model,
                            active=ActiveInspection() if active and model is not None else None,
                            planner=planner, targets=nominal.targets(),
-                           hazards=HazardResponder(planner, vehicle.bounding_radius) if avoid else None)
+                           hazards=HazardResponder(planner, vehicle.bounding_radius, hazard_config) if avoid else None)

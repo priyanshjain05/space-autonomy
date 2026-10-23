@@ -308,8 +308,9 @@ where it's going, find a safe way around, and still finish the inspection.
 ![debris encounter](docs/media/debris_encounter.gif)
 
 *The same encounter flown twice. Left: the robot ignores loose objects and flies into the debris (grey sphere, white
-trail). Right: it detects the debris 20 s before the predicted collision, holds position, waits 11 s for it to pass,
-and carries on. 1.25 m of clearance kept, 15 s added to the mission.*
+trail). Right: it flags the debris 30 s before the predicted conflict, stops to watch it, sees it can carry on safely,
+and does. When the debris comes back into conflict 11 s out, it holds for ~7 s while it passes. 0.59 m of clearance kept,
+9 s added to the mission.*
 
 **The test is adversarial on purpose.** The harness flies each mission once with no debris and records the trajectory.
 It then picks a moment and launches the debris so that it arrives exactly where the robot will be at that moment,
@@ -330,34 +331,59 @@ the robot only gets its sensor. **Ignoring the debris, the robot was hit in all 
    one with the biggest gap, log `no_safe_option`, and reconsider in a second.
 6. **Execute, keep watching, resume:** monitoring never stops, so a wrong prediction triggers another replan.
 
-400 encounters (40 per level), each flown both ways on the same spacecraft, seeds 6000+:
+400 encounters (40 per level), each flown both ways on the same spacecraft, seeds 6000+. The green line is the
+first version of the avoidance logic; the blue line is the current one (see [the fix](#fix-react-at-once-when-its-urgent)):
 
 ![hazard sweep](docs/media/hazard_sweep.png)
 
 | Condition | Hit: ignoring → avoiding | Closest approach (median) | Warning before conflict (median) | Extra time | Extra propellant |
 |---|---|---|---|---|---|
-| Debris 0.05 m/s, sensor 4 m | 100% → **0%** | 0.99 m | 34 s | +39 s | +7.7 pts |
-| Debris 0.15 m/s, sensor 4 m | 100% → **0%** | 0.82 m | 20 s | +20 s | +6.8 pts |
-| Debris 0.3 m/s, sensor 4 m | 100% → **0%** | 0.84 m | 12 s | +13 s | +6.4 pts |
-| Sensor 3 m (debris 0.15 m/s) | 100% → **0%** | 0.77 m | 15 s | +18 s | +6.6 pts |
-| Sensor 2 m | 100% → 5% | 0.76 m | 10 s | +19 s | +8.8 pts |
-| Sensor 1.5 m | 100% → 30% | 0.47 m | 7 s | +29 s | +12.6 pts |
-| Sensor 1 m | 100% → 45% | 0.02 m | 5 s | +33 s | +13.7 pts |
+| Debris 0.05 m/s, sensor 4 m | 100% → **0%** | 0.67 m | 41 s | +33 s | +8.8 pts |
+| Debris 0.15 m/s, sensor 4 m | 100% → **0%** | 0.74 m | 23 s | +16 s | +5.8 pts |
+| Debris 0.3 m/s, sensor 4 m | 100% → **0%** | 0.88 m | 12 s | +11 s | +6.2 pts |
+| Sensor 3 m (debris 0.15 m/s) | 100% → **0%** | 0.77 m | 16 s | +16 s | +6.4 pts |
+| Sensor 2 m | 100% → **0%** | 0.67 m | 10 s | +16 s | +7.4 pts |
+| Sensor 1.5 m | 100% → **0%** | 0.53 m | 7 s | +20 s | +8.9 pts |
+| Sensor 1 m | 100% → **0%** | 0.24 m | 5 s | +20 s | +9.5 pts |
 
-- **With a 3 m+ sensor, no debris speed tested got through.** 0 hits in 280 encounters, and every mission finished
-  every inspection. The 0.5 m gap was kept in 273 of them; the other 7 came closer (10–34 cm) without touching.
-  Those near misses are what to look at next: the prediction assumes a fixed robot speed and was occasionally optimistic.
-- **Sensor range is what matters, and the sweep finds the floor:** below ~2 m the warning drops to 5–7 s and hits
-  come back. **24 of the 30 short-range hits came while the robot was holding still at a viewpoint**: from rest, it
-  spends 2 s re-observing and then can't accelerate out of the way in time. The re-observe step that makes decisions
-  better with plenty of warning is what costs it at close range. Fix: skip it when the conflict is seconds away.
-- **Slow debris costs the most time** (+39 s at 0.05 m/s): there's no getting around something that takes a long
+- **No debris got through in any of the 400 encounters**, at any speed or sensor range tested, and every mission
+  finished every inspection. 0 contacts with the spacecraft in all 1,200 missions.
+- **The required 0.5 m gap holds down to a 1.5 m sensor** (kept in 85% of encounters there, 98–100% from 2 m up).
+  With a 1 m sensor there's ~5 s of warning and no option keeps 0.5 m: the robot dodges anyway and gets through
+  with a median 0.24 m to spare. It reports `no_safe_option` and re-plans every half second as its prediction
+  sharpens, a receding-horizon dodge.
+- **Slow debris costs the most time** (+33 s at 0.05 m/s): there's no getting around something that takes a long
   time to get out of the way. Fast debris is over quickly.
-- **Waiting and detouring are both used**, about equally (673 waits, 675 detours), depending on the geometry.
+- **Waiting and detouring are both used** (627 waits, 1,007 detours), depending on the geometry and the urgency.
 - **Inspection quality survives:** 699/720 faults correctly typed while avoiding vs. 700/720 with no debris at all.
   Debris drifting through the camera view occasionally gets reported as a "foreign object" on a healthy part
-  (5 false alarms over 400 missions), which, strictly, it is, but only for a moment.
-- 0 contacts with the spacecraft in all 1,200 missions.
+  (6 false alarms over 400 missions), which, strictly, it is, but only for a moment.
+
+### Fix: react at once when it's urgent
+
+The first version always stopped and watched for 2 s before deciding, and predicted its own motion at a constant
+0.2 m/s. The first sweep showed where that breaks: with a short-range sensor, **24 of the 30 hits came while the robot
+was holding still at a viewpoint**. It spent its few seconds of warning looking, then couldn't get moving in time.
+Two changes:
+
+1. **Urgent mode:** if the conflict is under 12 s away (2 s of looking + ~2.5 s to brake + ~6 s to get clear), skip the
+   pause and decide immediately with the estimate it has, including sidesteps as short as 0.6 m.
+2. **Predict the robot honestly:** replay the robot's own controller (acceleration limit, speed cap, the gentle
+   slow-down into each stop) instead of assuming a constant speed. From rest, the constant-speed guess thought the
+   robot would cover 0.40 m in 2 s; it really covers 0.20 m. The replay matches a simulated flight to within 3 cm.
+
+Same 40 encounters per level, three versions; the middle column is an ablation with change 2 only:
+
+| Sensor range | Before | Honest prediction only | Both changes |
+|---|---|---|---|
+| 1 m | 45% hit | 45% hit | **0% hit** |
+| 1.5 m | 30% hit | 15% hit | **0% hit** |
+| 2 m | 5% hit | 5% hit | **0% hit** |
+
+The better prediction alone halves the failures at 1.5 m; reacting immediately is what fixes 1 m. Better prediction
+also helped where things already worked: with a 3 m+ sensor, near misses (the 0.5 m gap broken without contact)
+dropped from 7 to 1 in 280 encounters, because the robot no longer assumes it can get somewhere faster than it can.
+And it made avoidance cheaper at short range (+33 s → +20 s at 1 m).
 
 What's simplified: one object at a time, perfectly spherical, drifting at constant velocity; a sensor with no
 occlusion or missed detections; and the robot's own motion predicted at a fixed speed.
@@ -382,6 +408,7 @@ python scripts/noise_sweep.py                # degradation curves for all three 
 python scripts/relook_analysis.py            # what re-inspection rescued / spoiled (after a sweep)
 python scripts/run_hazard.py --gif           # one debris encounter, flown ignoring vs. avoiding it
 python scripts/hazard_sweep.py               # 400 encounters across debris speed and sensor range (~25 min)
+python scripts/hazard_sweep.py --no-urgent --only-range 1,1.5,2 --out results/hazard_ablation   # the ablation
 python scripts/calibrate.py                  # refit + measure the confidence model (needs two sweeps; see the script)
 python scripts/run_mission.py --showcase --nav-att-deg 0.5 --no-registration   # see what a false alarm looks like
 python scripts/run_mission.py --showcase --nav-att-deg 1.5   # watch it doubt the antenna and look again (--passive to compare)
@@ -492,5 +519,5 @@ results/         run outputs (git-ignored)
    causing false surface damage, and add lighting faults to the confidence model's training data.
 3. **Subtler faults:** smaller debris, partial damage, so that "nominal" verdicts can be wrong and the confidence
    model learns when to doubt them.
-4. **Faster hazard reflexes:** skip the re-observe pause when a conflict is seconds away, and handle several objects,
-   missed detections and occlusion in the hazard sensor.
+4. **Harder hazards:** several objects at once, tumbling non-spherical debris, and a hazard sensor with missed
+   detections and occlusion. The 1 m-sensor case also suggests sizing the required gap to the warning time.

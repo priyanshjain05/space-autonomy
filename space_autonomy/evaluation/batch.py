@@ -75,7 +75,7 @@ def pose_errors(events) -> list[dict]:
     return out
 
 
-def run_hazard(sc, speed=0.15, radius=0.25, sensor_range=4.0) -> dict:
+def run_hazard(sc, speed=0.15, radius=0.25, sensor_range=4.0, hazard_config=None) -> dict:
     """One debris encounter, flown three ways on the same spacecraft:
 
     clean   no debris; its trajectory is what the adversary aims at
@@ -87,7 +87,8 @@ def run_hazard(sc, speed=0.15, radius=0.25, sensor_range=4.0) -> dict:
 
     def fly(avoid, strike=None):
         sim = SpaceSim(vehicle, sc.world, start_pos=sc.home, debris_radii=(radius,) if strike else ())
-        agent = make_inspection_agent(vehicle, sc.spacecraft, sc.home, sc.route, avoid=avoid)
+        agent = make_inspection_agent(vehicle, sc.spacecraft, sc.home, sc.route, avoid=avoid,
+                                      **({"hazard_config": hazard_config} if hazard_config else {}))
         result = run_mission(sim, agent, max_time=sc.max_time, expected_targets=sc.route,
                              camera=OnboardCamera(sim, seed=sc.seed),
                              hazard_sensor=HazardSensor(sim, seed=sc.seed) if strike else None,
@@ -109,9 +110,9 @@ def run_hazard(sc, speed=0.15, radius=0.25, sensor_range=4.0) -> dict:
 
 
 def run_hazard_job(job) -> dict:
-    """run_hazard(scenario, speed, sensor_range) as one picklable job, for run_many."""
-    sc, speed, sensor_range = job
-    return run_hazard(sc, speed=speed, sensor_range=sensor_range)
+    """run_hazard(scenario, speed, sensor_range[, hazard_config]) as one picklable job, for run_many."""
+    sc, speed, sensor_range, *config = job
+    return run_hazard(sc, speed=speed, sensor_range=sensor_range, hazard_config=config[0] if config else None)
 
 
 def run_many(scenarios, workers=None, progress=None, fn=None, **options) -> list[dict]:

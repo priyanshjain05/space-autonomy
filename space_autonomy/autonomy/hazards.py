@@ -16,8 +16,11 @@
           ↓
     Continue the mission
 
-Everything is predicted with constant velocity for the object (it's drifting
-debris, nothing pushes it) and a constant planning speed for the robot.
+The object is predicted at constant velocity (it's drifting debris, nothing
+pushes it); the robot by replaying its own controller along the plan.
+
+If the conflict is only seconds away there's no time to stop and look: the
+robot decides straight away with what it has ("urgent").
 """
 
 from dataclasses import dataclass, field
@@ -74,32 +77,64 @@ class Tracker:
 # ── Prediction ──────────────────────────────────────────────────────────────
 
 
-def timeline(start, waypoints, t0, speed, wait=0.0, pauses=None):
+@dataclass(frozen=True)
+class Motion:
+    """How the robot really moves, for predicting it: the pose controller's own numbers."""
+    max_speed: float = 0.25   # m/s, PoseGains.max_speed
+    max_accel: float = 0.1    # m/s^2, max_force / mass
+    pos_gain: float = 0.15    # 1/s, PoseGains.pos_gain: slows down into a stop
+    vel_gain: float = 0.8     # 1/s, PoseGains.vel_gain
+
+
+def timeline(start, waypoints, t0, *, v0=0.0, wait=0.0, pauses=None, motion: Motion = Motion(),
+             horizon=60.0, dt=0.1):
     """Where the robot will be, as a function of time.
 
-    Hold `wait` s, then fly the waypoints at `speed`, stopping pauses[k] seconds at waypoint k
-    (that's where it holds still to inspect).
+    Hold `wait` s, then fly the waypoints, stopping pauses[k] seconds at waypoint k (that's where it
+    holds still to inspect) and at the last one. Rather than assume a constant speed, this replays the
+    pose controller in one dimension along the path: it accelerates at most `max_accel`, cruises at
+    `max_speed`, and slows into each stop the way the real controller does. From rest, a constant-speed
+    guess gets the first few seconds wrong by a factor of two, which is exactly when dodging matters.
+    v0 is the robot's current speed along the path.
     """
     pauses = pauses or {}
-    pts = [np.asarray(start, float)]
-    times = [t0 + wait]
-    for k, w in enumerate(waypoints):
-        w = np.asarray(w, float)
-        pts.append(w)
-        times.append(times[-1] + np.linalg.norm(w - pts[-2]) / speed)
-        if pauses.get(k, 0) > 0:  # same point again, later: a stationary stretch
-            pts.append(w)
-            times.append(times[-1] + pauses[k])
+    pts = [np.asarray(start, float)] + [np.asarray(w, float) for w in waypoints]
+    seg = [np.linalg.norm(b - a) for a, b in zip(pts[:-1], pts[1:])]
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    stops = [(cum[k + 1], p) for k, p in sorted(pauses.items()) if p > 0 and k + 1 < len(cum)]
+    stops.append((cum[-1], np.inf))
+
+    m = motion
+    t, s, v = t0, 0.0, max(0.0, v0)
+    hold_until, k = t0 + wait, 0
+    times, dists = [t], [s]
+    while t < t0 + horizon:
+        target, pause = stops[k]
+        if t < hold_until:
+            v_des = 0.0
+        else:
+            d = target - s
+            v_des = min(m.max_speed, m.pos_gain * d)
+            if d < 0.05 and v < 0.03 and np.isfinite(pause):  # settled at a stop: hold, then go on
+                hold_until, k = t + pause, k + 1
+        v = max(0.0, v + np.clip(m.vel_gain * (v_des - v), -m.max_accel, m.max_accel) * dt)
+        s = min(s + v * dt, target)
+        t += dt
+        times.append(t)
+        dists.append(s)
+    times, dists = np.array(times), np.array(dists)
+    xyz = np.column_stack([np.interp(dists, cum, np.array(pts)[:, i]) for i in range(3)])
 
     def at(t):
-        if t <= times[0]:
-            return pts[0]
-        for i in range(len(pts) - 1):
-            if t <= times[i + 1]:
-                f = (t - times[i]) / max(times[i + 1] - times[i], 1e-9)
-                return pts[i] + f * (pts[i + 1] - pts[i])
-        return pts[-1]
-    return at, times[-1]
+        i = np.searchsorted(times, t)
+        if i <= 0:
+            return xyz[0]
+        if i >= len(times):
+            return xyz[-1]
+        f = (t - times[i - 1]) / (times[i] - times[i - 1])
+        return xyz[i - 1] + f * (xyz[i] - xyz[i - 1])
+    arrive = times[np.argmax(dists >= cum[-1] - 0.05)] if dists[-1] >= cum[-1] - 0.05 else np.inf
+    return at, arrive
 
 
 def min_gap(robot_at, obj_pos, obj_vel, gap_offset, t0, horizon, dt=0.25):
@@ -119,12 +154,14 @@ def min_gap(robot_at, obj_pos, obj_vel, gap_offset, t0, horizon, dt=0.25):
 class HazardConfig:
     safety: float = 0.5        # m, surface-to-surface gap the robot insists on
     horizon: float = 60.0      # s, how far ahead it predicts
-    plan_speed: float = 0.2    # m/s, robot speed assumed in predictions (cruise is 0.25 with accel/decel)
-    observe: float = 2.0       # s, watch the object after stopping, before deciding
+    motion: Motion = Motion()  # how the robot moves, for predicting it
+    observe: float = 2.0       # s, watch the object after stopping, before deciding ...
+    urgent: float = 12.0       # s, ... unless the conflict is closer than this: then decide at once.
+                               # (2 s of looking + ~2.5 s to brake + ~6 s to get clear from rest)
     rethink: float = 1.0       # s, when nothing is fully safe: hold the least-bad choice this long, then reconsider
     check_every: float = 0.5   # s
     min_obs: int = 4           # sightings needed before a track is trusted
-    detour_dists: tuple = (1.2, 2.0)  # m, how far to sidestep
+    detour_dists: tuple = (0.6, 1.2, 2.0)  # m, how far to sidestep
     detour_dirs: int = 8
 
 
@@ -175,7 +212,8 @@ class HazardResponder:
     def _worst(self, s: RobotState, plan, wait=0.0):
         """Worst predicted gap to any trusted track if the robot holds `wait` s then follows `plan`."""
         waypoints, pauses = plan
-        at, _ = timeline(s.position, waypoints, s.t, self.cfg.plan_speed, wait, pauses)
+        at, _ = timeline(s.position, waypoints, s.t, v0=_speed_along(s, waypoints), wait=wait, pauses=pauses,
+                         motion=self.cfg.motion, horizon=self.cfg.horizon)
         worst, who, when = np.inf, None, None
         for tr in self.tracker.active(s.t):
             if len(tr.times) < self.cfg.min_obs:
@@ -195,10 +233,13 @@ class HazardResponder:
             self._next_check = s.t + cfg.check_every
             gap, tr, when = self._worst(s, self._planned(seq, s.t))
             if gap < cfg.safety:
+                urgent = when - s.t < cfg.urgent
                 self.mode, self.hold, self._since = "holding", (s.position.copy(), s.quat.copy()), s.t
                 self._emit(s.t, "hazard_detected", track=tr.id, predicted_gap_m=round(gap, 3),
-                           seconds_to_conflict=round(when - s.t, 1), leg=seq.leg.name)
-                return self.hold
+                           seconds_to_conflict=round(when - s.t, 1), urgent=urgent, leg=seq.leg.name)
+                if urgent:  # no time to stop and look
+                    self._decide(s, seq)
+                return self.hold if self.mode != "clear" else None
             return None
 
         if self.mode == "holding":
@@ -217,6 +258,12 @@ class HazardResponder:
             return self.hold if self.mode != "clear" else None
         return None
 
+    def _arrival(self, s: RobotState, waypoints) -> float:
+        """Predicted seconds until the robot settles at the end of `waypoints`."""
+        _, arrive = timeline(s.position, waypoints, s.t, v0=_speed_along(s, waypoints), motion=self.cfg.motion,
+                             horizon=self.cfg.horizon * 2)
+        return arrive - s.t
+
     def _decide(self, s: RobotState, seq):
         cfg = self.cfg
         planned = self._planned(seq, s.t)
@@ -234,7 +281,7 @@ class HazardResponder:
 
         # Option 2: sidestep through a point off to the side of the object's track, then carry on.
         goal = np.asarray(seq.leg.waypoints[-1], float)
-        base_len = _length(s.position, seq.leg.waypoints[seq.wp_index:])
+        base_time = self._arrival(s, seq.leg.waypoints[seq.wp_index:])
         for tr in self.tracker.active(s.t):
             _, v = tr.estimate()
             for side in _perpendiculars(v, cfg.detour_dirs):
@@ -248,7 +295,7 @@ class HazardResponder:
                         continue
                     route = [via] + rest
                     g, _, _ = self._worst(s, self._planned(seq, s.t, rest=route))
-                    extra = (_length(s.position, route) - base_len) / cfg.plan_speed
+                    extra = self._arrival(s, route) - base_time
                     options.append(("detour", max(extra, 0.0), g, route))
 
         safe = [o for o in options if o[2] >= cfg.safety]
@@ -270,9 +317,13 @@ class HazardResponder:
             self._next_check = s.t + cfg.check_every
 
 
-def _length(start, pts):
-    pts = [np.asarray(start, float)] + [np.asarray(p, float) for p in pts]
-    return float(sum(np.linalg.norm(b - a) for a, b in zip(pts[:-1], pts[1:])))
+def _speed_along(s: RobotState, waypoints) -> float:
+    """The robot's current speed in the direction of its first waypoint (0 if moving away)."""
+    if not len(waypoints):
+        return 0.0
+    d = np.asarray(waypoints[0], float) - s.position
+    n = np.linalg.norm(d)
+    return float(max(0.0, s.velocity @ d / n)) if n > 1e-6 else 0.0
 
 
 def _perpendiculars(v, n):
