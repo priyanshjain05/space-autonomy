@@ -3,6 +3,8 @@
 A simulation and evaluation testbed for autonomous space robots, starting with one job:
 **a free-flying robot inspecting a spacecraft and finding what's wrong with it.**
 
+**Project page (the story and results, for non-coders): https://priyanshjain05.github.io/space-autonomy/**
+
 ![mission](docs/media/mission.gif)
 
 *Left: the inspector (orange cube) flying its route around the target spacecraft Alpha-03. Right: what its onboard camera sees.

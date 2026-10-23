@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="A simulated free-flying robot that inspects spacecraft, finds hidden damage and dodges debris, and the testbed that measured it across 10,000+ simulated missions.">
+<meta property="og:title" content="space-autonomy: testing a space robot's autonomy before it flies">
+<meta property="og:description" content="Simulation and evaluation testbed for autonomous spacecraft inspection, by Priyansh Jain.">
+<meta property="og:image" content="https://priyanshjain05.github.io/space-autonomy/media/overview.png">
+<title>space-autonomy · autonomous spacecraft inspection testbed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column (~66ch) for the argument; figures break out wider, framed like test plates.
+   Palette from the simulated spacecraft itself: MLI gold foil, solar-panel blue, space-tinted neutrals. */
+:root {
+  --bg: #f4f5f8;
+  --surface: #ffffff;
+  --ink: #161a24;
+  --ink-2: #4a5163;
+  --ink-3: #737b8f;
+  --rule: #dde0e8;
+  --gold: #a87816;
+  --gold-soft: #f3e7cb;
+  --blue: #23408f;
+  --blue-soft: #e3e8f5;
+  --good: #16794c;
+  --plate: #fcfcfb;          /* charts were rendered on this */
+  --font-display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --measure: 66ch;
+  --wide: 1080px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1017; --surface: #151a24; --ink: #e7e9ef; --ink-2: #b3b9c8; --ink-3: #8a92a6;
+    --rule: #262d3b; --gold: #e2b452; --gold-soft: #2e2615; --blue: #8fa8ec; --blue-soft: #18213a;
+    --good: #4cc38a; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1017; --surface: #151a24; --ink: #e7e9ef; --ink-2: #b3b9c8; --ink-3: #8a92a6;
+  --rule: #262d3b; --gold: #e2b452; --gold-soft: #2e2615; --blue: #8fa8ec; --blue-soft: #18213a;
+  --good: #4cc38a; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+img { max-width: 100%; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 1.0625rem; line-height: 1.62;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 4rem;
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--blue); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; border-radius: 2px; }
+
+.col { max-width: var(--measure); margin-inline: auto; }
+.wide { max-width: var(--wide); margin-inline: auto; }
+
+/* ── Masthead ───────────────────────────────────────────── */
+.masthead {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+  padding-block: 1.25rem; border-bottom: 1px solid var(--rule);
+  font-family: var(--font-data); font-size: 0.78rem; color: var(--ink-3); letter-spacing: 0.02em;
+}
+.masthead strong { color: var(--ink); font-weight: 500; }
+
+/* ── Hero ───────────────────────────────────────────────── */
+.hero { padding-block: 3.5rem 2rem; display: grid; gap: 1.5rem; }
+.eyebrow {
+  font-family: var(--font-display); font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.14em; font-size: 0.9rem; color: var(--gold);
+}
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+h1 { font-weight: 700; font-size: clamp(2.4rem, 6vw, 4.1rem); line-height: 1.0; letter-spacing: -0.005em; max-width: 18ch; }
+.lede { font-size: 1.22rem; line-height: 1.55; color: var(--ink-2); margin: 0; max-width: 58ch; }
+.byline { font-family: var(--font-data); font-size: 0.82rem; color: var(--ink-3); }
+.byline b { color: var(--ink); font-weight: 500; }
+
+.hero-figure { margin: 0; }
+.hero-figure img { display: block; width: 100%; border-radius: 4px; background: #000; }
+.hero-figure figcaption { margin-top: 0.6rem; }
+
+/* Key figures: the point of the page is that every claim has a number behind it. */
+.ledger {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1px;
+  background: var(--rule); border: 1px solid var(--rule); border-radius: 4px; overflow: hidden;
+  margin-block: 2.25rem 0;
+}
+.ledger div { background: var(--surface); padding: 1rem 1.1rem 1.05rem; display: grid; gap: 0.25rem; align-content: start; }
+.ledger .n {
+  font-family: var(--font-display); font-weight: 600; font-size: 2.1rem; line-height: 1;
+  font-variant-numeric: tabular-nums; color: var(--ink);
+}
+.ledger .n small { font-size: 1.05rem; color: var(--ink-3); font-weight: 500; }
+.ledger .l { font-size: 0.9rem; line-height: 1.4; color: var(--ink-2); }
+
+/* ── Prose sections ─────────────────────────────────────── */
+section { padding-block: 3rem 0; }
+h2 { font-weight: 600; font-size: clamp(1.75rem, 3.6vw, 2.35rem); line-height: 1.08; margin-bottom: 1rem; }
+h3 { font-weight: 600; font-size: 1.3rem; line-height: 1.2; margin-block: 1.6rem 0.4rem; }
+p { margin: 0 0 1rem; }
+.muted { color: var(--ink-2); }
+ul.plain { margin: 0 0 1rem; padding-left: 1.15rem; display: grid; gap: 0.45rem; }
+ul.plain li::marker { color: var(--gold); }
+em { font-style: italic; }
+
+/* Milestone header: the code is a real project milestone, so it earns its place. */
+.stage { display: flex; gap: 0.9rem; align-items: baseline; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.code {
+  font-family: var(--font-data); font-size: 0.78rem; font-weight: 500; letter-spacing: 0.04em;
+  color: var(--gold); background: var(--gold-soft); padding: 0.18rem 0.5rem; border-radius: 3px;
+  white-space: nowrap;
+}
+.stage .q { font-family: var(--font-display); font-size: 1rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-3); }
+
+/* Result callout: the one sentence a reader should take from each stage. */
+.result {
+  border-left: 3px solid var(--blue); background: var(--blue-soft);
+  padding: 0.85rem 1.1rem; margin: 1.25rem 0; border-radius: 0 4px 4px 0;
+}
+.result p { margin: 0; }
+.result .k {
+  font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em;
+  font-size: 0.78rem; color: var(--blue); display: block; margin-bottom: 0.2rem;
+}
+
+/* Figures: charts were rendered on a light plate, so they sit on one in both themes. */
+figure { margin: 1.75rem auto; }
+figure.plate {
+  background: var(--plate); border: 1px solid var(--rule); border-radius: 4px; padding: 0.75rem;
+}
+figure.plate a { display: block; }
+figure img { display: block; width: 100%; height: auto; border-radius: 2px; }
+figcaption {
+  font-family: var(--font-body); font-size: 0.9rem; line-height: 1.5; color: var(--ink-2);
+  max-width: var(--measure); margin: 0.65rem auto 0;
+}
+figure.plate figcaption { color: #4a5163; }
+.figs-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+
+/* Data tables: tabular figures, horizontal scroll inside their own box only. */
+.table-wrap { overflow-x: auto; margin: 1.25rem 0; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-family: var(--font-data); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 0.55rem 0.8rem; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+th { font-family: var(--font-display); font-weight: 600; font-size: 0.86rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+tr:last-child td { border-bottom: none; }
+td.win { color: var(--good); font-weight: 500; }
+
+/* The project prints this report after every mission; reproduced here as the page's signature. */
+.report {
+  font-family: var(--font-data); font-size: 0.8rem; line-height: 1.55; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 4px;
+  padding: 1rem 1.15rem; overflow-x: auto; margin: 1.25rem 0; white-space: pre;
+}
+.report .h { color: var(--gold); font-weight: 500; }
+.report .ok { color: var(--good); }
+
+/* Loop diagram */
+.loop { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 0.75rem; margin: 1.5rem 0; }
+.loop > div { background: var(--surface); border: 1px solid var(--rule); border-radius: 4px; padding: 0.9rem 1rem; display: grid; gap: 0.35rem; align-content: start; }
+.loop h4 { margin: 0; font-family: var(--font-display); font-weight: 600; font-size: 1.05rem; letter-spacing: 0.04em; text-transform: uppercase; }
+.loop .sim h4 { color: var(--ink-2); }
+.loop .auto h4 { color: var(--blue); }
+.loop .eval h4 { color: var(--gold); }
+.loop p { margin: 0; font-size: 0.93rem; line-height: 1.5; color: var(--ink-2); }
+.loop .io { font-family: var(--font-data); font-size: 0.74rem; color: var(--ink-3); }
+
+/* Findings list */
+.findings { display: grid; gap: 1rem; margin: 1.25rem 0; }
+.finding { display: grid; grid-template-columns: 2.2rem 1fr; gap: 0.8rem; align-items: start; }
+.finding .mark { font-family: var(--font-display); font-weight: 700; font-size: 1.5rem; line-height: 1; color: var(--gold); padding-top: 0.15rem; }
+.finding p { margin: 0; }
+.finding b { font-weight: 600; }
+
+details { border-top: 1px solid var(--rule); padding-block: 0.8rem; }
+details:last-of-type { border-bottom: 1px solid var(--rule); }
+summary { cursor: pointer; font-family: var(--font-display); font-weight: 600; font-size: 1.08rem; letter-spacing: 0.02em; }
+details[open] summary { margin-bottom: 0.5rem; }
+
+.foot {
+  margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--rule);
+  display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+  font-family: var(--font-data); font-size: 0.78rem; color: var(--ink-3);
+}
+code { font-family: var(--font-data); font-size: 0.86em; background: var(--surface); border: 1px solid var(--rule); padding: 0.05em 0.35em; border-radius: 3px; }
+
+@media (max-width: 560px) {
+  body { font-size: 1rem; }
+  .hero { padding-block: 2.25rem 1.5rem; }
+  .lede { font-size: 1.1rem; }
+  .finding { grid-template-columns: 1.6rem 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<header class="masthead wide">
+  <span><strong>space-autonomy</strong> · simulation &amp; evaluation testbed for autonomous space robots</span>
+  <span>Built in Python + MuJoCo · October 2026 · <a href="https://github.com/priyanshjain05/space-autonomy" target="_blank" rel="noopener">source</a></span>
+</header>
+
+<main>
+  <div class="hero wide">
+    <div class="eyebrow">Physical AI · spacecraft inspection</div>
+    <h1>Does the robot's autonomy actually work? Test it before it flies.</h1>
+    <p class="lede">I built a simulated free-flying robot that inspects a spacecraft, finds hidden damage, and deals with things going wrong. Then I built the harness that tries to break it, and measured what happened across more than 10,000 simulated missions.</p>
+    <div class="byline">By <b>Priyansh Jain</b> · NYU Stern · project log, milestones M0–M9</div>
+
+    <figure class="hero-figure">
+      <img src="media/mission.gif" alt="Left: an orange cube-shaped robot flies a looping route around a gold spacecraft with blue solar panels. Right: the robot's onboard camera view of each component it inspects." width="800" height="300">
+      <figcaption>The inspector (orange cube) flying its route around the target spacecraft, Alpha-03. Right: what its onboard camera sees. This spacecraft has four hidden faults; the robot finds all of them.</figcaption>
+    </figure>
+  </div>
+
+  <div class="wide">
+    <div class="ledger" role="list">
+      <div role="listitem"><span class="n">197<small>/197</small></span><span class="l">hidden faults found and correctly typed on 100 unseen spacecraft, with 0 false alarms</span></div>
+      <div role="listitem"><span class="n">65% <small>→</small> 0%</span><span class="l">false alarms at 1 cm of navigation error, before vs. after aligning the robot's model to its camera</span></div>
+      <div role="listitem"><span class="n">0.119 <small>→</small> 0.009</span><span class="l">gap between the robot's stated confidence and its actual accuracy, on held-out missions</span></div>
+      <div role="listitem"><span class="n">100% <small>→</small> 0%</span><span class="l">of 400 encounters with debris aimed at the robot that ended in a hit, ignoring vs. avoiding</span></div>
+    </div>
+  </div>
+
+  <section class="col" id="why">
+    <h2>Why build this</h2>
+    <p>Space is heading toward robots that work on their own: inspecting satellites, servicing them, assembling things in orbit. Communication delays, limited bandwidth and the cost of human attention all push toward autonomy. Companies like Starfish Space, GITAI and Astroscale are building those robots.</p>
+    <p>A claim like <em>"our robot can autonomously inspect a spacecraft"</em> doesn't say much on its own. How many scenarios was it tested in? What happens when its sensors are off, when the spacecraft isn't what it expected, when something drifts into its path? Does it know when it's wrong?</p>
+    <p>This project is my attempt at the other half of the problem: <b>not building the robot, but testing the intelligence of the robot</b>. It's a simulation and evaluation testbed, with spacecraft inspection as the first mission, built so that every claim below comes with a number and the conditions it was measured under.</p>
+  </section>
+
+  <section class="col" id="testbed">
+    <h2>The testbed</h2>
+    <p>Three parts that only meet through narrow interfaces, so the robot's software can't cheat by reading the simulator, and could later move to a different simulator or real hardware unchanged.</p>
+    <div class="loop">
+      <div class="sim">
+        <h4>Simulator</h4>
+        <p>A 10 kg cube-shaped free-flyer with 1 N cold-gas thrusters and a fixed propellant budget, around a spacecraft built from simple parts. Zero gravity, in the spacecraft's local frame.</p>
+        <p>It injects what goes wrong: hidden damage, navigation error, wrong lighting, drifting debris.</p>
+        <span class="io">MuJoCo · RGB-D camera · hazard sensor</span>
+      </div>
+      <div class="auto">
+        <h4>Autonomy</h4>
+        <p>Plans a collision-free route, flies it with a cascaded controller, compares each camera image with a "digital twin" of the healthy spacecraft, and keeps a belief about every component.</p>
+        <span class="io">sees: pose estimate, images, sightings · returns: thrust commands</span>
+      </div>
+      <div class="eval">
+        <h4>Evaluation harness</h4>
+        <p>Runs hundreds of randomised missions in parallel, records ground truth the robot never sees, and scores it: faults found, false alarms, collisions, closest approach, time and propellant.</p>
+        <span class="io">95% confidence intervals · held-out seeds</span>
+      </div>
+    </div>
+    <p>Every mission ends with a report like this one, generated by the code. This is the showcase spacecraft, which has one fault of each type:</p>
+<div class="report" role="img" aria-label="Mission report for alpha03-showcase: mission success yes, 7 of 7 targets inspected, 4 of 4 anomalies found with correct type, 0 false alarms, mission time 288 seconds, propellant used 126 grams or 42.1 percent, 0 collisions, minimum clearance 0.45 metres."><span class="h">MISSION REPORT</span>
+────────────────────────────────────────
+Mission:               alpha03-showcase
+Mission success:       <span class="ok">YES</span>
+Targets inspected:     7 / 7
+Anomalies found:       4 / 4
+  correct type:        4 / 4
+False alarms:          0
+Mission time:          288 s
+Propellant used:       126 g (42.1%)
+Delta-v spent:         7.05 m/s
+Distance flown:        38.6 m
+Collisions:            0
+Min clearance:         0.45 m
+Human interventions:   0</div>
+  </section>
+
+  <section class="col" id="faults">
+    <div class="stage"><span class="code">M0 – M6</span><span class="q">Can it fly, and can it see what's wrong?</span></div>
+    <h2>Find the faults</h2>
+    <p>First the basics: a 6-degree-of-freedom robot that flies itself to target poses, a spacecraft called Alpha-03, and a route that stays outside a keep-out sphere except along planned approach corridors. Then the inspection itself.</p>
+    <p>For each mission, the simulator hides one to three faults on Alpha-03: a missing part, a part rotated 20–30°, a piece of debris stuck on it, or a scorch mark. The robot is only told what the healthy spacecraft looks like. At each stop it takes a colour + depth image, renders what it <em>should</em> see from the same spot, and compares pixel by pixel. Material that's farther away than expected means something is missing; nearer means something new; same depth but a different colour means the surface changed. The mix says which kind of fault it is.</p>
+  </section>
+  <div class="wide">
+    <div class="figs-2">
+      <figure class="plate"><a href="media/m6_foreign_object.png" target="_blank" rel="noopener"><img src="media/m6_foreign_object.png" alt="Three panels: the onboard camera image of the antenna with a small grey object on it, the digital twin's clean image, and a change map highlighting the object in red." loading="lazy" width="1350" height="400"></a>
+        <figcaption>Debris on the antenna: camera, digital twin, and the change map (red = new material).</figcaption></figure>
+      <figure class="plate"><a href="media/m6_misaligned.png" target="_blank" rel="noopener"><img src="media/m6_misaligned.png" alt="Three panels: a tilted solar panel in the camera image, the straight panel in the digital twin, and a change map split into blue and red regions." loading="lazy" width="1350" height="400"></a>
+        <figcaption>A solar panel stuck 26° off: half of it is farther than expected (blue), half nearer (red).</figcaption></figure>
+    </div>
+  </div>
+  <div class="col">
+    <div class="result"><span class="k">Result</span><p>On 100 randomised spacecraft it had never seen, the robot found all 197 hidden faults with the right type, and raised 0 false alarms in 510 checks of healthy parts. The first version raised 19 false alarms; all of them were a tilted solar panel poking into a neighbour's camera view, fixed by only blaming change that's connected to the part being inspected.</p></div>
+    <p class="muted">A perfect score in simulation is a ceiling, not a claim. It assumed the robot knows exactly where it is. So the next step was to take that away.</p>
+  </div>
+
+  <section class="col" id="stress">
+    <div class="stage"><span class="code">Noise sweep</span><span class="q">How does it fail?</span></div>
+    <h2>Then break it on purpose</h2>
+    <p>I added navigation error (a slowly drifting offset between where the robot thinks it is and where it really is) and lighting error (the real sun a few degrees from where the twin assumes it), then swept each one across 656 paired missions.</p>
+    <p>The detector fell apart at <b>millimetres</b>. A quarter of a centimetre of position error, or a tenth of a degree of attitude error, shifts the image by under a pixel, and every sharp edge turns into a thin strip of fake "change". At 1 cm, 65% of healthy parts were flagged. Lighting, by contrast, was harmless up to 10°.</p>
+  </section>
+  <figure class="plate wide"><a href="media/noise_false_alarm.png" target="_blank" rel="noopener"><img src="media/noise_false_alarm.png" alt="A healthy solar panel with 0.5 degrees of attitude error: the camera and digital twin images look alike, but the change map shows thin red and blue strips along both long edges, and the verdict reads misaligned, 100 percent." loading="lazy" width="1350" height="400"></a>
+    <figcaption>A healthy panel, 0.5° of attitude error. The twin is a few pixels off, both edges light up, and the detector reports "misaligned, 100%": wrong, and fully confident.</figcaption></figure>
+
+  <section class="col" id="registration">
+    <div class="stage"><span class="code">M6.1</span><span class="q">Fix the alignment</span></div>
+    <h2>Line the twin up first</h2>
+    <p>The fix is to align the twin with the camera image before comparing them, in two stages. First in 3D: the depth image and the twin are the same surface seen from slightly different places, so point-to-plane ICP finds the small rigid motion between them, and that motion <em>is</em> the navigation error. Then in 2D: depth can't see sliding along a flat solar panel, but its outline can, so a Lucas–Kanade step aligns the images to a fraction of a pixel.</p>
+    <p>The risk is that alignment explains away a real fault. Guards: the worst-fitting points don't steer the fit, matching tightens from coarse to fine, and corrections larger than plausible navigation error are rejected. One real bug made it through anyway: a missing thruster dragged the fit 4 cm and got the healthy thruster next to it flagged. The mission tests caught it.</p>
+  </section>
+  <figure class="plate wide"><a href="media/registration_comparison.png" target="_blank" rel="noopener"><img src="media/registration_comparison.png" alt="Six charts: false alarm rate and correct-type rate versus navigation position error, attitude error and sun error, for the pipeline with and without registration. With registration, false alarms stay near zero up to 1 centimetre and 0.5 degrees." loading="lazy" width="1950" height="1092"></a>
+    <figcaption>1,476 missions, both pipelines on identical spacecraft. Shaded bands are 95% confidence intervals.</figcaption></figure>
+  <div class="col">
+    <div class="result"><span class="k">Result</span><p>False alarms at 1 cm of position error fell from 65% to 0%, and at 0.5° of attitude error from 73% to 2%. Tolerance to navigation error went up roughly 5–10×. Lighting stayed the weak spot, which alignment can't fix.</p></div>
+  </div>
+
+  <section class="col" id="confidence">
+    <div class="stage"><span class="code">M6.2</span><span class="q">Does it know when it's wrong?</span></div>
+    <h2>Make the confidence honest</h2>
+    <p>The detector's confidence was a heuristic that said ~100% whenever lots of pixels changed, including when those pixels were alignment artefacts. A robot that's always sure can't decide when to look again.</p>
+    <p>The simulator gives labelled data for free, so I trained a small logistic regression per verdict type to predict <em>P(this verdict is correct)</em> from things the robot can observe: how much changed, how well the alignment fit, and the <b>shape</b> of the change. Misalignment leaves thin strips along edges (65% of the change on edges, 2 px thick); real faults leave solid blobs (≤16% on edges, 27+ px thick).</p>
+  </section>
+  <figure class="plate wide"><a href="media/calibration.png" target="_blank" rel="noopener"><img src="media/calibration.png" alt="Two charts. Left: reliability diagram where the learned confidence follows the diagonal and the heuristic sits far above accuracy. Right: per noise condition, average learned confidence tracks accuracy closely while the heuristic stays near 100 percent." loading="lazy" width="1690" height="754"></a>
+    <figcaption>Fitted on 5,166 inspections, measured on 2,646 from different missions. On the dashed line, stated confidence equals accuracy.</figcaption></figure>
+  <div class="col">
+    <div class="table-wrap"><table>
+      <thead><tr><th>Held-out missions</th><th>Old heuristic</th><th>Learned</th></tr></thead>
+      <tbody>
+        <tr><td>Avg. gap, confidence vs. accuracy</td><td>0.119</td><td class="win">0.009</td></tr>
+        <tr><td>Ranks right above wrong (0.5 = chance)</td><td>0.565</td><td class="win">0.997</td></tr>
+        <tr><td>Accuracy of verdicts at ≥ 90%</td><td>88%</td><td class="win">99.8%</td></tr>
+      </tbody>
+    </table></div>
+    <div class="result"><span class="k">The interesting part</span><p>Trained without any examples of one noise type and tested on it, the confidence stayed honest across the two navigation errors (they leave the same signature) but not for lighting it had never seen. A learned confidence is only as honest as the failures it was tested against, which is the case for an evaluation platform in one sentence.</p></div>
+  </div>
+
+  <section class="col" id="relook">
+    <div class="stage"><span class="code">M7</span><span class="q">Act on doubt</span></div>
+    <h2>Look again when unsure</h2>
+    <p>With an honest confidence, the robot can act on it. Below 90%, it doesn't report yet: it flies to another viewpoint (tilted 30°, safe to reach, clear line of sight), looks again, and keeps its most confident verdict. The rest of the route is replanned around the detour.</p>
+  </section>
+  <figure class="plate wide"><a href="media/reinspection_comparison.png" target="_blank" rel="noopener"><img src="media/reinspection_comparison.png" alt="Nine charts comparing three pipelines across position, attitude and sun error: false alarm rate, correct-type rate and mission time. Re-inspection keeps false alarms near zero to 2 centimetres and 1 degree and costs extra mission time as error grows." loading="lazy" width="1950" height="1521"></a>
+    <figcaption>2,214 missions on fresh seeds the confidence model never saw. The bottom row is the cost in mission time.</figcaption></figure>
+  <div class="col">
+    <div class="result"><span class="k">Result</span><p>False alarms stay near zero out to 2 cm or 1° of navigation error, about twice the range registration alone handles. Across every component it looked at more than once, a second look fixed 292 wrong verdicts and broke 5 right ones. It costs ~10 s on easy missions and up to 52% more time at 2°, and it doesn't help with lighting: the sun is just as wrong from every angle.</p></div>
+  </div>
+
+  <section class="col" id="debris">
+    <div class="stage"><span class="code">M8 – M9</span><span class="q">When the world moves</span></div>
+    <h2>Get out of the way</h2>
+    <p>A loose 0.25 m piece of debris drifts into the robot's path. The test harness is adversarial: it flies each mission once clean, records the route, and launches the debris to arrive exactly where the robot will be, crossing its path or aimed at it while it holds still to inspect. The robot only has a short-range hazard sensor.</p>
+    <p>Its loop: predict the object forward and itself along its plan; if they'd come within 0.5 m, stop and watch; weigh waiting against sidestepping; pick the cheapest option that keeps the gap; keep watching; resume.</p>
+  </section>
+  <figure class="wide" style="max-width: 980px">
+    <img src="media/debris_encounter.gif" alt="Side-by-side animation of the same encounter. On the left, the robot flies into a drifting grey sphere. On the right, the robot stops, waits for the sphere to pass, and continues." loading="lazy" width="960" height="360" style="background:#000">
+    <figcaption>The same encounter, flown twice. Left: ignoring loose objects. Right: it flags the debris 30 s out, waits for it to pass, and carries on with 0.59 m to spare.</figcaption>
+  </figure>
+  <div class="col">
+    <p>The first sweep found the weak spot: with a sensor range under 2 m, 30–45% of encounters still ended in a hit, and 24 of those 30 hits happened while the robot was holding still. It spent its few seconds of warning watching, then couldn't get moving in time. It was also predicting its own motion at a constant speed, which overestimated how far it could get from a standstill by 2×. Two fixes: react immediately when a conflict is under 12 s away, and predict the robot by replaying its own controller (accurate to 3 cm).</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Sensor range</th><th>Before</th><th>Better prediction only</th><th>Both fixes</th></tr></thead>
+      <tbody>
+        <tr><td>1 m</td><td>45% hit</td><td>45% hit</td><td class="win">0% hit</td></tr>
+        <tr><td>1.5 m</td><td>30% hit</td><td>15% hit</td><td class="win">0% hit</td></tr>
+        <tr><td>2 m</td><td>5% hit</td><td>5% hit</td><td class="win">0% hit</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+  <figure class="plate wide" style="max-width: 940px"><a href="media/hazard_sweep.png" target="_blank" rel="noopener"><img src="media/hazard_sweep.png" alt="Six charts across debris speed and sensor range: hit rate, closest approach and extra mission time. Ignoring debris hits 100 percent of the time; the fixed avoidance logic is at 0 percent everywhere; the earlier version failed at short sensor ranges." loading="lazy" width="1560" height="1365"></a>
+    <figcaption>400 encounters per version, each flown ignoring and avoiding the debris on the same spacecraft.</figcaption></figure>
+  <div class="col">
+    <div class="result"><span class="k">Result</span><p>Ignoring the debris, the robot was hit in all 400 encounters. Avoiding it, 0 hits at every debris speed and every sensor range down to 1 m, and every mission still finished every inspection. At 1 m there's too little warning to keep the full 0.5 m gap; the robot dodges anyway with a median 0.24 m to spare.</p></div>
+  </div>
+
+  <section class="col" id="learned">
+    <h2>What the testbed surfaced</h2>
+    <p>The most useful results weren't the headline numbers. They were the failures the evaluation found that a single demo never would have.</p>
+    <div class="findings">
+      <div class="finding"><span class="mark">1</span><p><b>Credit assignment.</b> A fault on one part showing up in another part's camera view caused every false alarm in the first version.</p></div>
+      <div class="finding"><span class="mark">2</span><p><b>Perfect scores hide fragility.</b> 100% detection with perfect navigation turned into 65% false alarms at 1 cm of error.</p></div>
+      <div class="finding"><span class="mark">3</span><p><b>Confidence has to be earned.</b> A learned confidence was well calibrated on failure types it had seen and barely better than a guess on one it hadn't.</p></div>
+      <div class="finding"><span class="mark">4</span><p><b>Fixes have limits you can measure.</b> Looking again helps errors that change between looks and does nothing for errors that don't.</p></div>
+      <div class="finding"><span class="mark">5</span><p><b>Caution can be the failure mode.</b> The robot's 2-second pause to look before acting caused most of its collisions at short range.</p></div>
+      <div class="finding"><span class="mark">6</span><p><b>The tooling has bugs too.</b> Long batch runs found a renderer teardown bug that corrupted another renderer's output and a math-library crash on this macOS version. Both are fixed and covered by tests.</p></div>
+    </div>
+  </section>
+
+  <section class="col" id="details">
+    <h2>Details</h2>
+    <details>
+      <summary>How it's built</summary>
+      <p>Python, MuJoCo for physics and rendering, NumPy and SciPy for everything else. About 3,100 lines of library code and 74 automated tests, developed on a laptop (Apple M3 Pro). The robot's software only exchanges a pose estimate, camera images, sensor sightings and thrust commands with the simulator, which is the seam a future ROS 2 or Isaac Sim port would use.</p>
+      <p>Every result above is reproducible from a script and a seed range, and every comparison runs the competing versions on identical spacecraft. Where possible, the data used to tune something wasn't used to report it: detection was tuned on one seed range and reported on another, the confidence model was fitted on one and tested on another, and re-inspection was evaluated on a third. The exception is the debris fix, which was designed after seeing failures on the same encounters it's reported on; a fresh-seed rerun is the obvious next check.</p>
+    </details>
+    <details>
+      <summary>What's simplified</summary>
+      <ul class="plain">
+        <li>The spacecraft is built from boxes and cylinders, and the faults are clean geometry. Real damage is subtler.</li>
+        <li>Orbital dynamics are ignored: the target is the fixed reference frame, which is reasonable over minutes at a few metres.</li>
+        <li>Navigation error is modelled as a drifting offset, not produced by a real estimator.</li>
+        <li>Thrusters are ideal, and debris is a single sphere drifting at constant velocity. The hazard sensor has no occlusion or missed detections.</li>
+        <li>Everything here is simulation. Nothing has been validated against real hardware or flight data.</li>
+      </ul>
+    </details>
+    <details>
+      <summary>What's next</summary>
+      <ul class="plain">
+        <li>Lighting-robust comparison, and lighting faults in the confidence model's training data.</li>
+        <li>Re-inspection that weighs the value of a second look against its fuel and time.</li>
+        <li>Harder hazards: several tumbling objects, a sensor that misses things.</li>
+        <li>Subtler faults, so that a "healthy" verdict can be wrong too.</li>
+        <li>Learned perception, ROS 2, and a port to Isaac Sim on NVIDIA hardware.</li>
+      </ul>
+    </details>
+  </section>
+
+  <section class="col" id="about">
+    <h2>About</h2>
+    <p>I'm Priyansh Jain, coming from a business and technology background at NYU Stern. I'm interested in how physical AI will change space operations. Instead of waiting until I had a traditional aerospace background, I started building: simulation first, then perception, planning, failure recovery and evaluation. The project became an exploration of infrastructure for testing autonomous space robots before they fly.</p>
+    <p>I'm looking for internships in space robotics, autonomy, simulation and technical product roles. I'd be glad to walk through any part of this. The code, tests and every experiment script are on GitHub: <a href="https://github.com/priyanshjain05/space-autonomy" target="_blank" rel="noopener">github.com/priyanshjain05/space-autonomy</a>.</p>
+  </section>
+
+  <footer class="foot wide">
+    <span>space-autonomy · milestones M0–M9</span>
+    <span>All figures from simulation. Code, seeds and scripts: <a href="https://github.com/priyanshjain05/space-autonomy" target="_blank" rel="noopener">github.com/priyanshjain05/space-autonomy</a></span>
+  </footer>
+</main>
+</body>
+</html>
