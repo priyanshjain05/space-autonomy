@@ -11,6 +11,7 @@ import numpy as np
 from ..core.types import VehicleSpec
 from ..sim.anomalies import inject, random_anomalies
 from ..sim.spacecraft import Component, Spacecraft
+from .conditions import Conditions
 
 GOLD = (0.85, 0.65, 0.25, 1)      # multi-layer insulation blanket
 PANEL = (0.12, 0.2, 0.55, 1)
@@ -45,6 +46,7 @@ class Scenario:
     actual: Spacecraft | None = None  # what is really out there (None: matches the nominal model)
     anomalies: tuple = ()        # ground truth, never shown to the robot
     seed: int = 0
+    conditions: Conditions = Conditions()
 
     @property
     def world(self) -> Spacecraft:

@@ -4,6 +4,7 @@
     python scripts/run_mission.py --seed 7         # a different random spacecraft
     python scripts/run_mission.py --clean          # undamaged spacecraft
     python scripts/run_mission.py --showcase       # one anomaly of each type
+    python scripts/run_mission.py --nav-att-deg 0.5  # with navigation error (also --nav-pos-cm, --sun-deg)
     python scripts/run_mission.py --gif            # also record an animated GIF
     mjpython scripts/run_mission.py --viewer       # watch it live (macOS needs mjpython)
 """
@@ -12,6 +13,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -23,6 +25,7 @@ from space_autonomy.evaluation.harness import run_mission
 from space_autonomy.evaluation.plots import plot_assessment, plot_states, plot_trajectory
 from space_autonomy.evaluation.report import format_report, save_run
 from space_autonomy.scenarios.alpha03 import nominal, showcase, with_anomalies
+from space_autonomy.scenarios.conditions import Conditions
 from space_autonomy.sim.render import SceneRenderer
 from space_autonomy.sim.sensors import OnboardCamera
 from space_autonomy.sim.world import SpaceSim
@@ -33,6 +36,9 @@ def main():
     ap.add_argument("--seed", type=int, default=1, help="which random set of anomalies")
     ap.add_argument("--clean", action="store_true", help="no anomalies")
     ap.add_argument("--showcase", action="store_true", help="one anomaly of each type")
+    ap.add_argument("--nav-pos-cm", type=float, default=0.0, help="navigation position error, cm per axis")
+    ap.add_argument("--nav-att-deg", type=float, default=0.0, help="navigation attitude error, deg per axis")
+    ap.add_argument("--sun-deg", type=float, default=0.0, help="error in the sun direction the twin assumes")
     ap.add_argument("--out", default=None, help="output folder (default results/<scenario>)")
     ap.add_argument("--gif", action="store_true", help="record mission.gif")
     ap.add_argument("--viewer", action="store_true", help="live 3D viewer (run with mjpython on macOS)")
@@ -40,7 +46,8 @@ def main():
     args = ap.parse_args()
 
     sc = nominal() if args.clean else showcase() if args.showcase else with_anomalies(args.seed)
-    sim = SpaceSim(sc.vehicle, sc.world, start_pos=sc.home)
+    sc = replace(sc, conditions=Conditions(args.nav_pos_cm / 100, args.nav_att_deg, args.sun_deg))
+    sim = SpaceSim(sc.vehicle, sc.world, start_pos=sc.home, sun_dir=sc.conditions.sun_dir(sc.seed))
     agent = make_inspection_agent(sc.vehicle, sc.spacecraft, sc.home, sc.route)
     camera = OnboardCamera(sim, seed=sc.seed)
     out = Path(args.out or f"results/{sc.name}")
@@ -48,7 +55,7 @@ def main():
     for old in (out / "views").glob("*.png"):
         old.unlink()
 
-    print(f"Scenario {sc.name}: {len(sc.anomalies)} hidden anomalies")
+    print(f"Scenario {sc.name}: {len(sc.anomalies)} hidden anomalies, conditions: {sc.conditions.label()}")
     planned = [p for leg in agent.legs for p in leg.waypoints]
     frames, trail = [], []
 
@@ -76,6 +83,7 @@ def main():
         _hold(viewer, 5.0)
 
     result = run_mission(sim, agent, max_time=sc.max_time, expected_targets=sc.route, camera=camera,
+                         nav=sc.conditions.navigation(sc.seed),
                          on_event=on_event, on_tick=on_tick, name=sc.name)
     result.summary.update(score_anomalies(agent.world_model, sc.anomalies, sc.route))
 

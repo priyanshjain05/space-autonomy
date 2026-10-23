@@ -22,7 +22,7 @@ evaluation harness that measures what actually happened.
 | M1 | 6-DOF free-flyer flies itself to position + attitude targets | ✅ |
 | M2–M5 | Target spacecraft (Alpha-03), onboard camera, fixed inspection route | ✅ |
 | M6 | Anomaly detection: missing, misaligned, foreign object, surface damage | ✅ |
-| M10–M11 | Randomised missions + batch scoring | ✅ (early: anomalies only) |
+| M10–M11 | Randomised missions, batch scoring, noise sweep (pose + lighting) | ✅ (early) |
 | M7 | Decide what to inspect next from what's still uncertain | next |
 | M8–M9 | Unexpected obstacle, autonomous recovery | |
 | M12+ | Learned perception / planning, ROS 2, Isaac Sim | |
@@ -98,18 +98,59 @@ thruster_1      anomaly         missing                1.00
 
 ### Why 100% is the wrong takeaway
 
-The detector is perfect here because the problem is currently easy in three specific ways, each
-of which is a planned next step:
+Those results assume the robot knows its exact pose and the twin is lit exactly like reality.
+The next experiment measures what happens when those assumptions break.
 
-- **The robot knows its exact pose.** The twin image lines up pixel-for-pixel with the real one.
-  With realistic navigation error (a few cm, a degree), every edge in the image becomes a "change".
-  This is the single biggest weakness of model-based detection and the main reason to move to
-  learned perception later.
-- **Lighting is identical** between the twin and reality. Real sun angles, glare and shadows differ.
-- **Anomalies are clean geometry.** Real damage is subtle: a frayed blanket, a hairline crack.
+## Robustness: how detection degrades
 
-So these numbers mark the top of the scale. The useful experiment comes next: add pose
-noise, lighting changes and subtler faults, and measure how fast performance falls.
+Same 40 random damaged spacecraft (plus one undamaged) at every level, sweeping one factor at a time
+(656 missions, about 3.5 minutes on an 11-core M3 Pro):
+
+![degradation curves](docs/media/noise_degradation.png)
+
+| Condition | False alarms | Mostly reported as |
+|---|---|---|
+| Perfect knowledge | 0% | - |
+| Position error 2.5 mm (σ per axis) | 16% | surface damage |
+| Position error 1 cm | 65% | misaligned |
+| Attitude error 0.1° | 16% | surface damage |
+| Attitude error 0.25° | 44% | misaligned + surface damage |
+| Sun direction off by 10° | 0% | - |
+| Sun direction off by 20° | 28% | surface damage |
+
+Full table: `results/noise_sweep/summary.md` after running `python scripts/noise_sweep.py`. What the numbers say:
+
+- **Real faults are always found** (blue line at 100%), but that's not a win. Under noise the
+  detector flags almost everything, healthy parts included. The false alarm rate is the real story.
+- **Pose error is the killer, and the tolerance is tiny.** False alarms start at **millimetres** of
+  position error and **a tenth of a degree** of attitude error. With this camera (640 px, 60° view),
+  0.1° of rotation, or 2.5 mm of sideways error at 1.5 m, shifts the image by about 0.7 pixels.
+  Every sharp edge then becomes a thin strip of "change":
+
+  ![false alarm from 0.5 deg attitude error](docs/media/noise_false_alarm.png)
+
+  *A healthy solar panel, 0.5° of attitude error: the twin is a few pixels off, so both long edges light up as
+  farther (blue) and nearer (red) material. The verdict is "misaligned, 100%", wrong and fully confident.*
+- **The failure has a signature.** Small errors produce false *surface damage* (colour edges shift
+  first). Larger errors produce false *misaligned* (depth edges split into farther + nearer pairs). That's
+  a clue for the fix, not just a symptom.
+- **Lighting is a much smaller problem.** Up to 10° of sun error does nothing, because the detector
+  leans on depth, which doesn't care about light. 20° starts to break colour comparisons.
+- **Confidence is not calibrated.** Wrong verdicts come out at 100%. A confidence that doesn't drop
+  when the robot is wrong can't drive "look again" decisions (M7).
+- **Safety is unaffected** at these levels: 0 collisions in all 656 missions.
+
+For scale: navigation good to millimetres and hundredths of a degree at a few metres is far
+beyond what a small inspector can be expected to have. Pixel-by-pixel comparison against a twin
+works only in simulation as things stand.
+
+**What would fix it**, in order of effort:
+1. **Register before comparing:** align the twin image to the camera image (small shift and rotation)
+   before differencing. This directly targets the edge-strip failure.
+2. **Edge tolerance:** ignore differences within a few pixels of depth edges the twin predicts.
+3. **Learned perception (M12):** a model trained on randomised renders, robust to pose and lighting by construction.
+
+This sweep is now the yardstick: each of those fixes has to move these curves.
 
 ## Quick start
 
@@ -126,6 +167,9 @@ python scripts/run_mission.py --showcase     # one anomaly of each type -> resul
 python scripts/run_mission.py --seed 7       # a random damaged spacecraft
 python scripts/run_mission.py --clean        # undamaged spacecraft
 python scripts/batch_eval.py --runs 100      # many random missions -> results/batch/summary.md
+python scripts/batch_eval.py --runs 100 --nav-att-deg 0.25   # ...with navigation error (also --nav-pos-cm, --sun-deg)
+python scripts/noise_sweep.py                # degradation curves -> results/noise_sweep/
+python scripts/run_mission.py --showcase --nav-att-deg 0.5   # see what a false alarm looks like
 mjpython scripts/run_mission.py --viewer     # watch live (macOS needs `mjpython`, installed with MuJoCo)
 pytest
 ```
@@ -161,14 +205,15 @@ too, but only as a renderer for the *nominal* model; any renderer would do.)
 | [`sim/thrusters.py`](space_autonomy/sim/thrusters.py) | Caps force at 1 N and torque at 0.1 N·m per axis; burns propellant at `thrust / (Isp · g0)` with cold-gas Isp = 60 s. |
 | [`sim/spacecraft.py`](space_autonomy/sim/spacecraft.py) | A spacecraft is a list of primitive components. The same list generates the MuJoCo geometry *and* the obstacles + inspection targets the autonomy plans with. |
 | [`sim/anomalies.py`](space_autonomy/sim/anomalies.py) | Damages a spacecraft: removes, tilts, sticks debris on, or scorches components. Keeps the ground truth. |
-| [`sim/sensors.py`](space_autonomy/sim/sensors.py) | RGB-D camera with Gaussian noise (2% colour, 5 mm depth). |
+| [`sim/sensors.py`](space_autonomy/sim/sensors.py) | RGB-D camera with Gaussian noise (2% colour, 5 mm depth); slowly drifting navigation error. |
+| [`scenarios/conditions.py`](space_autonomy/scenarios/conditions.py) | How far reality departs from the robot's assumptions: navigation error, sun-direction error. |
 | [`controllers/pose_controller.py`](space_autonomy/controllers/pose_controller.py) | Cascaded controller: position error → desired velocity (capped at 0.25 m/s) → force. Same idea for attitude. |
 | [`planning/paths.py`](space_autonomy/planning/paths.py) | Fly straight if it's safe; otherwise back out to a keep-out sphere, go around it, come back in. |
 | [`planning/sequencer.py`](space_autonomy/planning/sequencer.py) | Executes legs: fly through waypoints, settle, point the camera, hold, next. |
 | [`perception/reference.py`](space_autonomy/perception/reference.py) | Digital twin: renders the nominal spacecraft from the robot's pose (colour, depth, which-component-is-where). |
 | [`perception/change_detection.py`](space_autonomy/perception/change_detection.py) | Compares the real and expected images and names the anomaly. |
 | [`autonomy/agent.py`](space_autonomy/autonomy/agent.py), [`world_model.py`](space_autonomy/autonomy/world_model.py) | Ties planning, control and perception together; keeps the robot's beliefs. |
-| [`evaluation/`](space_autonomy/evaluation/) | Mission harness, anomaly scoring, reports, plots. |
+| [`evaluation/`](space_autonomy/evaluation/) | Mission harness, anomaly scoring, parallel batch runner with confidence intervals, reports, plots. |
 
 ### Key ideas (in plain terms)
 
@@ -188,7 +233,8 @@ too, but only as a renderer for the *nominal* model; any renderer would do.)
 
 ### Known simplifications (on purpose, for now)
 
-- Perfect state knowledge (see above). Noisy navigation comes next.
+- Navigation error is modelled as a drifting offset on the robot's estimate, not as a real
+  estimator (no visual odometry or filter yet). Off by default; the noise sweep turns it on.
 - Ideal thrusters: instant response, no misalignment, constant mass.
 - The planner plans around the *nominal* spacecraft, so it doesn't know about a tilted panel or debris.
   With damage, worst-case clearance drops from 0.45 m to 0.32 m. That's safe, but only by luck,
@@ -207,7 +253,7 @@ space_autonomy/
   autonomy/      inspection agent, world model
   evaluation/    mission harness, anomaly scoring, reports, plots
   scenarios/     Alpha-03 spacecraft + scenarios (nominal, random anomalies, showcase)
-scripts/         m0_smoke, m1_goto, run_mission, batch_eval
+scripts/         m0_smoke, m1_goto, run_mission, batch_eval, noise_sweep
 tests/           rotations, control, perception, full missions
 docs/media/      images used in this README
 results/         run outputs (git-ignored)
@@ -215,7 +261,8 @@ results/         run outputs (git-ignored)
 
 ## What's next
 
-1. **Stress the perception:** add navigation noise and lighting variation to the batch evaluation
-   and plot detection rate against noise level. This is the first real "how does it degrade" curve.
+1. **Make perception survive pose error:** register the twin to the camera image before comparing,
+   then re-run the noise sweep to show the curves move.
 2. **M7, active inspection:** when a verdict is uncertain, choose another viewpoint instead of moving on.
+   This needs calibrated confidence first.
 3. **M8/M9, unexpected obstacle and recovery:** debris drifts into the path; the robot stops, re-plans and still finishes.

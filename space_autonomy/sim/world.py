@@ -27,7 +27,11 @@ def _camera_xyaxes(pos, target):
     return _fmt(np.concatenate([right, up]))
 
 
-def build_mjcf(vehicle: VehicleSpec, spacecraft: Spacecraft | None, start_pos, start_quat, timestep) -> str:
+SUN_DIR = np.array([-0.4, 0.5, -0.75])  # direction sunlight travels, spacecraft frame
+
+
+def build_mjcf(vehicle: VehicleSpec, spacecraft: Spacecraft | None, start_pos, start_quat, timestep,
+               sun_dir=SUN_DIR) -> str:
     h = vehicle.half_size
     overview_pos = np.array([10.0, -10.0, 7.0])
     return f"""
@@ -48,7 +52,7 @@ def build_mjcf(vehicle: VehicleSpec, spacecraft: Spacecraft | None, start_pos, s
              mark="random" markrgb="0.9 0.9 1" random="0.004" width="1024" height="1024"/>
   </asset>
   <worldbody>
-    <light name="sun" directional="true" dir="-0.4 0.5 -0.75" diffuse="1 0.97 0.9" specular="0.3 0.3 0.3"/>
+    <light name="sun" directional="true" dir="{_fmt(sun_dir)}" diffuse="1 0.97 0.9" specular="0.3 0.3 0.3"/>
     <camera name="overview" pos="{_fmt(overview_pos)}" xyaxes="{_camera_xyaxes(overview_pos, [0, 0, 0])}" fovy="50"/>
     {spacecraft.mjcf() if spacecraft else ""}
     <body name="inspector" pos="{_fmt(start_pos)}" quat="{_fmt(start_quat)}">
@@ -67,13 +71,13 @@ def build_mjcf(vehicle: VehicleSpec, spacecraft: Spacecraft | None, start_pos, s
 
 class SpaceSim:
     def __init__(self, vehicle: VehicleSpec, spacecraft: Spacecraft | None = None,
-                 start_pos=(0.0, 0.0, 0.0), start_quat=None, timestep=0.01):
+                 start_pos=(0.0, 0.0, 0.0), start_quat=None, timestep=0.01, sun_dir=SUN_DIR):
         start_pos = np.asarray(start_pos, float)
         if start_quat is None:  # by default, start facing the spacecraft
             start_quat = look_at_quat(-start_pos) if np.linalg.norm(start_pos) > 0 else np.array([1.0, 0, 0, 0])
         self.vehicle = vehicle
         self.spacecraft = spacecraft
-        self.xml = build_mjcf(vehicle, spacecraft, start_pos, start_quat, timestep)
+        self.xml = build_mjcf(vehicle, spacecraft, start_pos, start_quat, timestep, sun_dir)
         self.model = mujoco.MjModel.from_xml_string(self.xml)
         self.data = mujoco.MjData(self.model)
         mujoco.mj_forward(self.model, self.data)

@@ -23,10 +23,11 @@ class MissionResult:
     events: list
 
 
-def run_mission(sim, autonomy, *, max_time, expected_targets=(), camera=None, control_hz=20.0, log_hz=10.0,
-                on_event=None, on_tick=None, name="mission") -> MissionResult:
+def run_mission(sim, autonomy, *, max_time, expected_targets=(), camera=None, nav=None, control_hz=20.0,
+                log_hz=10.0, on_event=None, on_tick=None, name="mission") -> MissionResult:
     """
     camera                sensor that serves the autonomy's image requests (None: no images)
+    nav                   navigation error model; the autonomy sees its estimate, not the truth (None: perfect)
     on_event(event, sim)  called for every autonomy event (e.g. to save what the robot saw)
     on_tick(sim, rows)    called every log tick (e.g. to record video or drive a viewer)
     """
@@ -37,16 +38,16 @@ def run_mission(sim, autonomy, *, max_time, expected_targets=(), camera=None, co
     next_log = 0.0
     start_pos = sim.state().position
 
+    estimate = nav.estimate if nav is not None else (lambda s: s)
     while sim.t < max_time and not autonomy.done:
-        state = sim.state()
-        cmd = autonomy.command(state)
+        cmd = autonomy.command(estimate(sim.state()))
         touched = sim.step(cmd, dt)
         if touched and not touching:
             collisions += 1   # count each new contact episode once
         touching = touched
 
         if camera is not None and getattr(autonomy, "image_request", None):
-            autonomy.on_image(camera.capture(), sim.state())
+            autonomy.on_image(camera.capture(), estimate(sim.state()))
 
         for ev in autonomy.pop_events():
             events.append(ev)

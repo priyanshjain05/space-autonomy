@@ -6,9 +6,10 @@ from space_autonomy.core.types import VehicleSpec
 from space_autonomy.perception.change_detection import assess
 from space_autonomy.perception.reference import ReferenceRenderer
 from space_autonomy.scenarios.alpha03 import ALPHA03
+from space_autonomy.scenarios.conditions import Conditions
 from space_autonomy.sim.anomalies import inject
 from space_autonomy.sim.sensors import OnboardCamera
-from space_autonomy.sim.world import SpaceSim
+from space_autonomy.sim.world import SUN_DIR, SpaceSim
 
 VEHICLE = VehicleSpec()
 TARGETS = {t.name: t for t in ALPHA03.targets()}
@@ -19,10 +20,11 @@ def reference():
     return ReferenceRenderer(VEHICLE, ALPHA03)
 
 
-def look(reference, spacecraft, name):
+def look(reference, spacecraft, name, sun_dir=SUN_DIR):
     """Park the robot at `name`'s viewpoint in `spacecraft`, take a picture, assess it."""
     t = TARGETS[name]
-    sim = SpaceSim(VEHICLE, spacecraft, start_pos=t.viewpoint, start_quat=look_at_quat(t.point - t.viewpoint))
+    sim = SpaceSim(VEHICLE, spacecraft, start_pos=t.viewpoint, start_quat=look_at_quat(t.point - t.viewpoint),
+                   sun_dir=sun_dir)
     obs = OnboardCamera(sim, seed=0).capture()
     return assess(obs, reference.render(sim.state()), reference.index(name), name)
 
@@ -30,6 +32,12 @@ def look(reference, spacecraft, name):
 @pytest.mark.parametrize("name", list(TARGETS))
 def test_healthy_spacecraft_raises_no_alarm(reference, name):
     assert look(reference, ALPHA03, name).kind == "nominal"
+
+
+@pytest.mark.parametrize("name", list(TARGETS))
+def test_tolerates_a_5_degree_sun_error(reference, name):
+    """The noise sweep found no false alarms up to 10 degrees; hold the line at 5."""
+    assert look(reference, ALPHA03, name, Conditions(sun_error_deg=5).sun_dir(seed=0)).kind == "nominal"
 
 
 @pytest.mark.parametrize("kind, name", [
