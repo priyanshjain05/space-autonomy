@@ -84,6 +84,12 @@ def main():
         print(f"  ({time.time() - t0:.0f} s)")
         for j, (f, v, _) in enumerate(conds):
             results[(pipe, f, v)] = aggregate(summaries[j * len(base):(j + 1) * len(base)], n_targets)
+        # Every inspection, with the robot's features and the truth: training/test data for calibrate.py.
+        rows_out = [r for s in summaries for r in s["assessments"]]
+        with open(out / f"assessments_{pipe}.csv", "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows_out[0]))
+            w.writeheader()
+            w.writerows(rows_out)
 
     rows = []
     for pipe in args.pipelines.split(","):

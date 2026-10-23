@@ -45,11 +45,14 @@ class Thresholds:
 class Assessment:
     component: str
     kind: str
-    confidence: float          # heuristic, not calibrated (see README)
+    confidence: float          # heuristic; the agent replaces it with a calibrated one when it has a model
     expected_px: int
     farther_px: int
     nearer_px: int
     color_px: int
+    # Shape of the change, which tells real faults from misalignment (see _shape):
+    edge_frac: float = 0.0     # share of changed pixels lying on edges the twin predicts
+    thickness_px: float = 0.0  # half-width of the thickest changed region
     masks: dict = field(default_factory=dict, repr=False)  # for visualisation
 
 
@@ -71,6 +74,25 @@ def _touching(mask, target, reach):
     near_target = ndimage.binary_dilation(target, iterations=reach)
     hit = np.unique(regions[near_target & mask])
     return np.isin(regions, hit[hit > 0])
+
+
+def _shape(change, ref_depth, edge_jump=0.05):
+    """How the changed pixels are laid out.
+
+    Misregistration produces thin strips hugging the twin's depth edges; a real
+    fault produces a solid blob. So: what share of the change sits on predicted
+    edges, and how thick (in pixels, from the middle to the border) its thickest
+    part is.
+    """
+    total = int(change.sum())
+    if total == 0:
+        return 0.0, 0.0
+    d = ref_depth.astype(float)
+    edges = np.zeros_like(change)
+    edges[:, 1:] |= np.abs(np.diff(d, axis=1)) > edge_jump
+    edges[1:, :] |= np.abs(np.diff(d, axis=0)) > edge_jump
+    edges = ndimage.binary_dilation(edges, iterations=2)
+    return float((change & edges).sum() / total), float(ndimage.distance_transform_edt(change).max())
 
 
 def _confidence(px, min_px):
@@ -97,6 +119,7 @@ def assess(obs: Observation, ref: ReferenceView, component: int, name: str, th: 
     color_px = int((recolored & expected).sum())
     masks = {"expected": expected, "farther": farther & expected, "nearer": new_material,
              "color": recolored & expected}
+    shape = _shape(masks["farther"] | masks["nearer"] | masks["color"], ref.depth)
 
     if far_px >= th.missing_frac * n_exp and near_px < th.min_px:
         kind, px = MISSING, far_px
@@ -108,5 +131,6 @@ def assess(obs: Observation, ref: ReferenceView, component: int, name: str, th: 
         kind, px = DAMAGE, color_px
     else:
         biggest = max(far_px, near_px, color_px)
-        return Assessment(name, NOMINAL, 1 - 0.5 * biggest / th.min_px, n_exp, far_px, near_px, color_px, masks)
-    return Assessment(name, kind, _confidence(px, th.min_px), n_exp, far_px, near_px, color_px, masks)
+        return Assessment(name, NOMINAL, 1 - 0.5 * biggest / th.min_px, n_exp, far_px, near_px, color_px,
+                          *shape, masks)
+    return Assessment(name, kind, _confidence(px, th.min_px), n_exp, far_px, near_px, color_px, *shape, masks)

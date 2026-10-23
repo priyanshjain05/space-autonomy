@@ -15,7 +15,8 @@ from dataclasses import replace
 import numpy as np
 
 from ..core.types import Observation, RobotState, VehicleSpec, Wrench
-from ..perception.change_detection import Thresholds, assess
+from ..perception.calibration import ConfidenceModel, features
+from ..perception.change_detection import UNOBSERVABLE, Thresholds, assess
 from ..perception.reference import ReferenceRenderer
 from ..perception.registration import align_image, refine_camera_pose, warp_view
 from ..planning.inspection_planner import fixed_route_inspector
@@ -25,9 +26,11 @@ from .world_model import WorldModel
 
 class InspectionAgent:
     def __init__(self, sequencer: LegSequencer, reference: ReferenceRenderer, world_model: WorldModel,
-                 thresholds: Thresholds = Thresholds(), registration: bool = True):
+                 thresholds: Thresholds = Thresholds(), registration: bool = True,
+                 confidence_model: ConfidenceModel | None = None):
         self.sequencer = sequencer
         self.registration = registration
+        self.confidence_model = confidence_model  # None: keep the heuristic confidence
         self.reference = reference
         self.world_model = world_model
         self.thresholds = thresholds
@@ -64,17 +67,23 @@ class InspectionAgent:
         ref = self.reference.render(state)
         event = {"t": round(state.t, 3), "event": "assessed", "leg": name,
                  "est_position": state.position.tolist(), "est_quat": state.quat.tolist()}
+        reg = img = None
+        fallback = False
         if self.registration:
-            ref, refined, reg, img = self._register(obs, ref, state)
+            ref, refined, reg, img, fallback = self._register(obs, ref, state)
             event.update(refined_position=refined.position.tolist(), refined_quat=refined.quat.tolist(),
                          icp_accepted=reg.accepted, icp_shift_m=round(reg.shift_m, 4),
                          icp_rotation_deg=round(reg.rotation_deg, 3), image_accepted=img.accepted,
                          image_shift_px=round(float(np.hypot(img.dx_px, img.dy_px)), 2),
                          image_rotation_deg=round(img.rotation_deg, 3))
         a = assess(obs, ref, self.reference.index(name), name, self.thresholds)
+        f = features(a, self.thresholds.min_px, reg, img, fallback)
+        event.update(result=a.kind, heuristic_confidence=round(a.confidence, 4), features=f)
+        if self.confidence_model is not None and a.kind != UNOBSERVABLE:
+            a = replace(a, confidence=self.confidence_model.predict(f, a.kind))
         self.world_model.update(a)
         self.last = (obs, ref, a)
-        event.update(result=a.kind, confidence=round(a.confidence, 2))
+        event["confidence"] = round(a.confidence, 4)
         self._events.append(event)
 
     def _register(self, obs, ref, state):
@@ -87,16 +96,24 @@ class InspectionAgent:
             refined = self.reference.state_for_camera(cam_R, cam_t, state)
             ref = self.reference.render(refined)
         img = align_image(obs, ref)
-        if reg.accepted and not img.accepted:
+        fallback = reg.accepted and not img.accepted
+        if fallback:
             # The stages disagree: after the 3D correction the picture still needs an implausibly
             # big shift. The 3D fit was probably pulled by a fault in view, so don't trust it.
             reg = replace(reg, accepted=False)
             refined, ref = state, raw
             img = align_image(obs, ref)
-        return warp_view(ref, img), refined, reg, img
+        return warp_view(ref, img), refined, reg, img, fallback
 
 
-def make_inspection_agent(vehicle: VehicleSpec, nominal, home, order, registration=True) -> InspectionAgent:
-    """Baseline 1 + perception: fixed route, model-based change detection at every stop."""
+def make_inspection_agent(vehicle: VehicleSpec, nominal, home, order, registration=True,
+                          calibrated=True) -> InspectionAgent:
+    """Baseline 1 + perception: fixed route, model-based change detection at every stop.
+
+    calibrated: use the learned confidence model (perception/confidence_model.json) if it exists.
+    It was trained on the registered pipeline, so it's only used with registration on.
+    """
     seq = fixed_route_inspector(vehicle, nominal.targets(), nominal.obstacles(), home, order=order)
-    return InspectionAgent(seq, ReferenceRenderer(vehicle, nominal), WorldModel(order), registration=registration)
+    model = ConfidenceModel.load() if calibrated and registration else None
+    return InspectionAgent(seq, ReferenceRenderer(vehicle, nominal), WorldModel(order),
+                           registration=registration, confidence_model=model)

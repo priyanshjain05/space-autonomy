@@ -23,6 +23,7 @@ evaluation harness that measures what actually happened.
 | M2–M5 | Target spacecraft (Alpha-03), onboard camera, fixed inspection route | ✅ |
 | M6 | Anomaly detection: missing, misaligned, foreign object, surface damage | ✅ |
 | M6.1 | Registration: twin aligned to the camera; robust to ~1 cm / 0.5° navigation error | ✅ |
+| M6.2 | Calibrated confidence, learned from simulated missions and measured on held-out ones | ✅ |
 | M10–M11 | Randomised missions, batch scoring, noise sweep (pose + lighting) | ✅ (early) |
 | M7 | Decide what to inspect next from what's still uncertain | next |
 | M8–M9 | Unexpected obstacle, autonomous recovery | |
@@ -140,7 +141,7 @@ Full table: `results/noise_sweep/summary.md` after running `python scripts/noise
 - **Lighting is a much smaller problem.** Up to 10° of sun error does nothing, because the detector
   leans on depth, which doesn't care about light. 20° starts to break colour comparisons.
 - **Confidence is not calibrated.** Wrong verdicts come out at 100%. A confidence that doesn't drop
-  when the robot is wrong can't drive "look again" decisions (M7).
+  when the robot is wrong can't drive "look again" decisions (M7). Fixed [below](#calibrated-confidence).
 - **Safety is unaffected** at these levels: 0 collisions in all 656 missions.
 
 For scale: navigation good to millimetres and hundredths of a degree at a few metres is far
@@ -196,6 +197,59 @@ Same sweep, both pipelines, identical spacecraft (1,476 missions):
 - **Cost:** about 0.35 s of extra compute per inspection view (a second render + both alignment stages),
   roughly 4× slower missions in the batch runner.
 
+## Calibrated confidence
+
+A confidence is *calibrated* if, of all the verdicts reported at 80%, about 80% are right. The original
+heuristic wasn't: it said ~100% whenever enough pixels changed, including when those pixels were
+misregistration strips. A robot that's always sure can't decide when to look again.
+
+The simulator gives labelled data for free (every inspection comes with the true answer), so the
+confidence is **learned**: one small logistic regression per verdict type, predicting *P(verdict is
+correct)* from things the robot can observe:
+
+- **Evidence size:** pixels that got farther, nearer or changed colour, relative to the detection threshold.
+- **Evidence shape:** what share of the change lies on edges the twin predicts, and how thick the thickest
+  changed region is. Misregistration leaves thin strips along edges (65% on edges, 2 px thick, in a typical
+  case); real faults leave solid blobs (≤16% on edges, ≥27 px thick).
+- **Registration quality:** whether each alignment stage was accepted, how well the 3D fit converged,
+  how big a correction it needed, and whether the stages disagreed.
+
+Fitted on 5,166 inspections from the noise sweep (seeds 3000+), measured on 2,646 inspections from
+**different missions** (seeds 4000+):
+
+![calibration](docs/media/calibration.png)
+
+| Metric | Heuristic (before) | Learned |
+|---|---|---|
+| Expected calibration error (avg. gap between stated confidence and accuracy) | 0.119 | **0.009** |
+| Brier score (lower is better) | 0.120 | **0.012** |
+| AUROC: does confidence rank right verdicts above wrong ones? (0.5 = no) | 0.565 | **0.997** |
+| Average confidence vs. actual accuracy | 0.99 vs. 0.88 | **0.87 vs. 0.88** |
+| Verdicts at ≥ 90% confidence: share, and how often right | 98%, 88% right | 84%, **99.8% right** |
+
+The right panel is the useful view. Under each noise condition, the old confidence stays near 100% while
+accuracy drops as low as 37%. The learned confidence drops *with* it, so the robot's average confidence
+under a condition now tells you how much to trust it under that condition.
+
+**Does it hold up under conditions it wasn't trained on?** Train with one kind of noise left out entirely,
+test only on that kind:
+
+| Left out of training | Calibration error: heuristic → learned | AUROC learned |
+|---|---|---|
+| Navigation position error | 0.179 → **0.037** | 0.958 |
+| Navigation attitude error | 0.110 → **0.021** | 0.996 |
+| Sun direction error | 0.082 → 0.076 | 0.747 |
+
+Position and attitude error transfer to each other: both cause misregistration, which leaves the same
+thin-strip signature. Lighting does not: its false alarms look different, and a model that has never seen
+one can't recognise one. **A learned confidence is only as honest as the failure modes in its training
+data.** That's the strongest argument yet for this project's premise. You can't trust a robot's
+sense of its own reliability without systematically testing the conditions it will meet.
+
+Caveats: the "nominal" verdict was never wrong in training (every injected fault was found), so the model
+trusts it at ~100%. That's fine for these faults but would be overconfident against subtler ones. The
+middle confidence bins in the reliability plot hold few verdicts, so they're noisy.
+
 ## Quick start
 
 macOS / Linux, Python 3.10+:
@@ -213,6 +267,7 @@ python scripts/run_mission.py --clean        # undamaged spacecraft
 python scripts/batch_eval.py --runs 100      # many random missions -> results/batch/summary.md
 python scripts/batch_eval.py --runs 100 --nav-att-deg 0.25   # ...with navigation error (also --nav-pos-cm, --sun-deg)
 python scripts/noise_sweep.py                # degradation curves, with vs without registration (~18 min)
+python scripts/calibrate.py                  # refit + measure the confidence model (needs two sweeps; see the script)
 python scripts/run_mission.py --showcase --nav-att-deg 0.5 --no-registration   # see what a false alarm looks like
 mjpython scripts/run_mission.py --viewer     # watch live (macOS needs `mjpython`, installed with MuJoCo)
 pytest
@@ -257,6 +312,7 @@ too, but only as a renderer for the *nominal* model; any renderer would do.)
 | [`perception/reference.py`](space_autonomy/perception/reference.py) | Digital twin: renders the nominal spacecraft from the robot's pose (colour, depth, which-component-is-where). |
 | [`perception/registration.py`](space_autonomy/perception/registration.py) | Lines the twin up with the camera: point-to-plane ICP on depth, then Lucas–Kanade on the image. |
 | [`perception/change_detection.py`](space_autonomy/perception/change_detection.py) | Compares the real and expected images and names the anomaly. |
+| [`perception/calibration.py`](space_autonomy/perception/calibration.py) | Learned confidence (per-verdict logistic regression) and calibration metrics; the trained model ships as `confidence_model.json`. |
 | [`autonomy/agent.py`](space_autonomy/autonomy/agent.py), [`world_model.py`](space_autonomy/autonomy/world_model.py) | Ties planning, control and perception together; keeps the robot's beliefs. |
 | [`evaluation/`](space_autonomy/evaluation/) | Mission harness, anomaly scoring, parallel batch runner with confidence intervals, reports, plots. |
 
@@ -284,7 +340,9 @@ too, but only as a renderer for the *nominal* model; any renderer would do.)
 - The planner plans around the *nominal* spacecraft, so it doesn't know about a tilted panel or debris.
   With damage, worst-case clearance drops from 0.45 m to 0.32 m. That's safe, but only by luck,
   and it's exactly the M8 problem.
-- Each component is judged from a single view; confidences are heuristic, not calibrated.
+- Each component is judged from a single view.
+- The confidence model only knows the failure modes it was trained on (see the lighting result), and a
+  "nominal" verdict was never wrong in training, so it is currently trusted almost completely.
 - Registration corrects the pose used for *perception only*; it isn't fed back into navigation yet.
 
 ## Repository layout
@@ -299,7 +357,7 @@ space_autonomy/
   autonomy/      inspection agent, world model
   evaluation/    mission harness, anomaly scoring, reports, plots
   scenarios/     Alpha-03 spacecraft + scenarios (nominal, random anomalies, showcase)
-scripts/         m0_smoke, m1_goto, run_mission, batch_eval, noise_sweep
+scripts/         m0_smoke, m1_goto, run_mission, batch_eval, noise_sweep, calibrate
 tests/           rotations, control, perception, full missions
 docs/media/      images used in this README
 results/         run outputs (git-ignored)
@@ -307,9 +365,11 @@ results/         run outputs (git-ignored)
 
 ## What's next
 
-1. **Calibrated confidence:** wrong verdicts still come out at 100%. Use registration quality
-   (residual misfit, whether it was accepted) and the evidence size to produce a confidence that
-   actually tracks accuracy, and measure that on the sweep.
-2. **M7, active inspection:** when a verdict is uncertain, choose another viewpoint instead of moving on.
-3. **Lighting-robust comparison:** compare shading-invariant features (or relight the twin) so sun error stops causing false surface damage.
+1. **M7, active inspection:** the confidence is now honest, so use it. Below a threshold, go and look again
+   from a different viewpoint instead of reporting. On the held-out data, the verdicts under 90% confidence were
+   right only 24% of the time, so they're exactly the ones worth a second look.
+2. **Lighting-robust comparison:** compare shading-invariant features (or relight the twin) so sun error stops
+   causing false surface damage, and add lighting faults to the confidence model's training data.
+3. **Subtler faults:** smaller debris, partial damage, so that "nominal" verdicts can be wrong and the confidence
+   model learns when to doubt them.
 4. **M8/M9, unexpected obstacle and recovery:** debris drifts into the path; the robot stops, re-plans and still finishes.

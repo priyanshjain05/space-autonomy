@@ -16,11 +16,12 @@ from .anomaly_scoring import score_anomalies
 from .harness import run_mission
 
 
-def run_scenario(sc, registration=True) -> dict:
+def run_scenario(sc, registration=True, calibrated=True) -> dict:
     """One full mission under the scenario's conditions -> flat summary dict."""
     c = sc.conditions
     sim = SpaceSim(sc.vehicle, sc.world, start_pos=sc.home, sun_dir=c.sun_dir(sc.seed))
-    agent = make_inspection_agent(sc.vehicle, sc.spacecraft, sc.home, sc.route, registration=registration)
+    agent = make_inspection_agent(sc.vehicle, sc.spacecraft, sc.home, sc.route, registration=registration,
+                                  calibrated=calibrated)
     result = run_mission(sim, agent, max_time=sc.max_time, expected_targets=sc.route,
                          camera=OnboardCamera(sim, seed=sc.seed), nav=c.navigation(sc.seed),
                          log_hz=2.0, name=sc.name)
@@ -30,9 +31,25 @@ def run_scenario(sc, registration=True) -> dict:
     s["seed"] = sc.seed
     s["registration"] = registration
     s["pose_errors"] = pose_errors(result.events)
+    s["assessments"] = assessment_rows(result.events, sc)
     s["false_alarm_kinds"] = [b.kind for n, b in agent.world_model.beliefs.items()
                               if b.kind and n not in {a.component for a in sc.anomalies}]
     return s
+
+
+def assessment_rows(events, sc) -> list[dict]:
+    """One row per inspection: what the robot observed (features), said, and whether it was right."""
+    truth = {a.component: a.kind for a in sc.anomalies}
+    rows = []
+    for e in events:
+        if e["event"] != "assessed":
+            continue
+        actual = truth.get(e["leg"], "nominal")
+        rows.append({"mission": sc.name, "seed": sc.seed, **asdict(sc.conditions), "component": e["leg"],
+                     "truth": actual, "verdict": e["result"], "correct": int(e["result"] == actual),
+                     "heuristic_confidence": e["heuristic_confidence"], "confidence": e["confidence"],
+                     **e["features"]})
+    return rows
 
 
 def pose_errors(events) -> list[dict]:
