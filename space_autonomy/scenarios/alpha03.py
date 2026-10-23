@@ -4,11 +4,12 @@ Spacecraft frame: origin at the bus centre, +z "up" (antenna side),
 solar panel wings along +/-y, docking port on -x, thrusters on -z.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from ..core.types import VehicleSpec
+from ..sim.anomalies import inject, random_anomalies
 from ..sim.spacecraft import Component, Spacecraft
 
 GOLD = (0.85, 0.65, 0.25, 1)      # multi-layer insulation blanket
@@ -36,11 +37,18 @@ ALPHA03 = Spacecraft("Alpha-03", (
 @dataclass(frozen=True)
 class Scenario:
     name: str
-    spacecraft: Spacecraft
+    spacecraft: Spacecraft       # nominal model: what the robot is told the target looks like
     vehicle: VehicleSpec
     home: np.ndarray
-    route: tuple        # visiting order for the fixed-route baseline
-    max_time: float     # s, mission is a failure if not complete by then
+    route: tuple                 # visiting order for the fixed-route baseline
+    max_time: float              # s, mission is a failure if not complete by then
+    actual: Spacecraft | None = None  # what is really out there (None: matches the nominal model)
+    anomalies: tuple = ()        # ground truth, never shown to the robot
+    seed: int = 0
+
+    @property
+    def world(self) -> Spacecraft:
+        return self.actual or self.spacecraft
 
 
 def nominal() -> Scenario:
@@ -53,3 +61,29 @@ def nominal() -> Scenario:
                "docking_port", "thruster_2", "thruster_1"),
         max_time=1200.0,
     )
+
+
+def with_anomalies(seed: int, n: int | None = None, specific=()) -> Scenario:
+    """Nominal scenario plus anomalies.
+
+    specific  [(kind, component), ...] to inject exactly those; otherwise
+              n random ones (1-3 if n is None), reproducible from `seed`.
+    """
+    rng = np.random.default_rng(seed)
+    base = nominal()
+    if specific:
+        sc, truth = base.spacecraft, []
+        for kind, comp in specific:
+            sc, a = inject(sc, kind, comp, rng)
+            truth.append(a)
+        truth = tuple(truth)
+    else:
+        sc, truth = random_anomalies(base.spacecraft, rng, int(rng.integers(1, 4)) if n is None else n)
+    return replace(base, name=f"alpha03-seed{seed}", actual=sc, anomalies=truth, seed=seed)
+
+
+def showcase() -> Scenario:
+    """One of each anomaly type, for the README demo."""
+    sc = with_anomalies(seed=3, specific=[("misaligned", "solar_panel_2"), ("foreign_object", "antenna"),
+                                          ("surface_damage", "docking_port"), ("missing", "thruster_1")])
+    return replace(sc, name="alpha03-showcase")

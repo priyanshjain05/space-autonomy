@@ -23,10 +23,11 @@ class MissionResult:
     events: list
 
 
-def run_mission(sim, autonomy, *, max_time, expected_targets=(), control_hz=20.0, log_hz=10.0,
+def run_mission(sim, autonomy, *, max_time, expected_targets=(), camera=None, control_hz=20.0, log_hz=10.0,
                 on_event=None, on_tick=None, name="mission") -> MissionResult:
     """
-    on_event(event, sim)  called for every autonomy event (e.g. to grab a camera image)
+    camera                sensor that serves the autonomy's image requests (None: no images)
+    on_event(event, sim)  called for every autonomy event (e.g. to save what the robot saw)
     on_tick(sim, rows)    called every log tick (e.g. to record video or drive a viewer)
     """
     dt = 1.0 / control_hz
@@ -43,6 +44,9 @@ def run_mission(sim, autonomy, *, max_time, expected_targets=(), control_hz=20.0
         if touched and not touching:
             collisions += 1   # count each new contact episode once
         touching = touched
+
+        if camera is not None and getattr(autonomy, "image_request", None):
+            autonomy.on_image(camera.capture(), sim.state())
 
         for ev in autonomy.pop_events():
             events.append(ev)

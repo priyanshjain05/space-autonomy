@@ -38,6 +38,21 @@ class Wrench:
 
 
 @dataclass(frozen=True)
+class CameraSpec:
+    """The inspector's onboard RGB-D camera, mounted on the body +x face looking along +x."""
+    width: int = 640
+    height: int = 480
+    fovy: float = 60.0   # deg, vertical field of view
+
+
+@dataclass(frozen=True)
+class Observation:
+    """One onboard camera frame."""
+    rgb: np.ndarray      # (H, W, 3) uint8
+    depth: np.ndarray    # (H, W) float32, metres along the optical axis
+
+
+@dataclass(frozen=True)
 class VehicleSpec:
     """Datasheet for the free-flying inspector.
 
@@ -50,6 +65,7 @@ class VehicleSpec:
     max_torque: float = 0.1       # N*m per body axis
     isp: float = 60.0             # s, typical for cold-gas (nitrogen) thrusters
     propellant: float = 0.3       # kg at launch
+    camera: CameraSpec = CameraSpec()
 
     @property
     def inertia(self) -> np.ndarray:

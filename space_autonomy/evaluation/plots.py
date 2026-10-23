@@ -36,6 +36,42 @@ def plot_states(rows, path, title=""):
     plt.close(fig)
 
 
+CHANGE_COLORS = {"farther": (0.25, 0.55, 1.0), "nearer": (1.0, 0.25, 0.2), "color": (1.0, 0.85, 0.1)}
+
+
+def plot_assessment(obs, ref, a, path):
+    """Onboard image | digital-twin image | where they differ, and what that means."""
+    gray = (obs.rgb.mean(axis=2, keepdims=True) / 255.0).repeat(3, axis=2) * 0.5
+    overlay = gray.copy()
+    for key, rgb in CHANGE_COLORS.items():
+        if key in a.masks:
+            overlay[a.masks[key]] = rgb
+    if "expected" in a.masks:  # outline where the component should be
+        e = a.masks["expected"]
+        edge = e & ~(np.roll(e, 1, 0) & np.roll(e, -1, 0) & np.roll(e, 1, 1) & np.roll(e, -1, 1))
+        overlay[edge] = (0.2, 1.0, 0.4)
+
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4.4))
+    ax[0].imshow(obs.rgb)
+    ax[0].set_title("Onboard camera (what is there)")
+    ax[1].imshow(ref.rgb)
+    ax[1].set_title("Digital twin (what should be there)")
+    ax[2].imshow(overlay)
+    verdict = a.kind.replace("_", " ").upper()
+    ax[2].set_title(f"{a.component}: {verdict}  ({a.confidence:.0%})",
+                    color="black" if a.kind == "nominal" else "firebrick", fontweight="bold")
+    for x in ax:
+        x.axis("off")
+    from matplotlib.patches import Patch
+    handles = [Patch(color=(0.2, 1.0, 0.4), label="expected outline")] + [
+        Patch(color=c, label={"farther": "farther (missing material)", "nearer": "nearer (new material)",
+                              "color": "colour change"}[k]) for k, c in CHANGE_COLORS.items()]
+    fig.legend(handles=handles, loc="lower center", ncol=4, fontsize=8, frameon=False)
+    fig.tight_layout(rect=(0, 0.06, 1, 1))
+    fig.savefig(path, dpi=90)
+    plt.close(fig)
+
+
 def _box_edges(box):
     signs = np.array(list(itertools.product((-1, 1), repeat=3)))
     corners = [box.center + box.rotation @ (s * box.half) for s in signs]

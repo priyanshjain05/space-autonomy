@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..core.geometry import Box, InspectionTarget
-from ..core.rotations import look_at_quat, quat_to_mat
+from ..core.rotations import look_at_quat, mat_to_quat, quat_to_mat
 
 
 @dataclass(frozen=True)
@@ -24,12 +24,17 @@ class Component:
     axis: tuple = (0.0, 0.0, 1.0)    # cylinder axis direction
     inspect_from: tuple | None = None  # direction to view it from; None = not an inspection target
     standoff: float = 1.5            # m
+    quat: tuple = (1.0, 0.0, 0.0, 0.0)  # extra rotation about the component's centre (used for misalignment)
 
     @property
     def rotation(self) -> np.ndarray:
-        # A frame whose z axis is `axis` (any roll is fine for a cylinder).
-        R = quat_to_mat(look_at_quat(self.axis))  # body x -> axis
-        return np.column_stack([R[:, 1], R[:, 2], R[:, 0]])
+        if self.shape == "box":
+            base = np.eye(3)
+        else:
+            # A frame whose z axis is `axis` (any roll is fine for a cylinder).
+            R = quat_to_mat(look_at_quat(self.axis))  # body x -> axis
+            base = np.column_stack([R[:, 1], R[:, 2], R[:, 0]])
+        return quat_to_mat(self.quat) @ base
 
     def obstacle(self) -> Box:
         """Conservative box around the component (a cylinder becomes its bounding box)."""
@@ -50,8 +55,8 @@ class Component:
         size = " ".join(f"{s:g}" for s in self.size)
         pos = " ".join(f"{p:g}" for p in self.pos)
         rgba = " ".join(f"{c:g}" for c in self.rgba)
-        orient = "" if self.shape == "box" else f' zaxis="{" ".join(f"{a:g}" for a in self.axis)}"'
-        return (f'<geom name="sc_{self.name}" type="{self.shape}" size="{size}" pos="{pos}"{orient} '
+        quat = " ".join(f"{a:.6g}" for a in mat_to_quat(self.rotation))
+        return (f'<geom name="sc_{self.name}" type="{self.shape}" size="{size}" pos="{pos}" quat="{quat}" '
                 f'rgba="{rgba}"/>')
 
 

@@ -35,6 +35,9 @@ def build_mjcf(vehicle: VehicleSpec, spacecraft: Spacecraft | None, start_pos, s
   <!-- No gravity: in the target's local frame over a few minutes, orbital
        effects are small, so we ignore them for now (see README). -->
   <option timestep="{timestep}" gravity="0 0 0" integrator="implicitfast"/>
+  <!-- Fixed scene size, so camera clipping planes (and so depth readings of
+       empty space) don't change when a component is added or removed. -->
+  <statistic center="0 0 0" extent="8"/>
   <visual>
     <global offwidth="1600" offheight="1200"/>
     <headlight ambient="0.12 0.12 0.14" diffuse="0.25 0.25 0.25" specular="0 0 0"/>
@@ -55,7 +58,7 @@ def build_mjcf(vehicle: VehicleSpec, spacecraft: Spacecraft | None, start_pos, s
             rgba="0.05 0.05 0.05 1" contype="0" conaffinity="0" mass="0"/>
       <!-- Body +x is where the robot "looks". Camera looks along its -z,
            so camera z = -body x, camera y (image up) = body z. -->
-      <camera name="onboard" pos="{h + 0.05} 0 0" xyaxes="0 -1 0 0 0 1" fovy="60"/>
+      <camera name="onboard" pos="{h + 0.05} 0 0" xyaxes="0 -1 0 0 0 1" fovy="{vehicle.camera.fovy}"/>
     </body>
   </worldbody>
 </mujoco>

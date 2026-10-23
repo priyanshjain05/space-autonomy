@@ -23,6 +23,12 @@ def format_report(summary: dict) -> str:
         f"Min clearance:         " + (f"{s['min_clearance_m']:.2f} m" if s["min_clearance_m"] is not None else "n/a"),
         f"Human interventions:   {s['human_interventions']}",
     ]
+    if "anomalies_injected" in s:
+        lines[5:5] = [
+            f"Anomalies found:       {s['anomalies_found']} / {s['anomalies_injected']}",
+            f"  correct type:        {s['anomaly_type_correct']} / {s['anomalies_found']}",
+            f"False alarms:          {s['false_alarms']}",
+        ]
     return "\n".join(lines)
 
 

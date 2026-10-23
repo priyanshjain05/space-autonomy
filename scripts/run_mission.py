@@ -1,8 +1,11 @@
-"""M2/M5: the inspector flies a fixed route around Alpha-03 and photographs each component.
+"""Inspection mission around Alpha-03: fly the route, look at every component, report anomalies.
 
-    python scripts/run_mission.py                # headless run, saves report + images
-    python scripts/run_mission.py --gif          # also record an animated GIF
-    mjpython scripts/run_mission.py --viewer     # watch it live (macOS needs mjpython)
+    python scripts/run_mission.py                  # random anomalies (seed 1)
+    python scripts/run_mission.py --seed 7         # a different random spacecraft
+    python scripts/run_mission.py --clean          # undamaged spacecraft
+    python scripts/run_mission.py --showcase       # one anomaly of each type
+    python scripts/run_mission.py --gif            # also record an animated GIF
+    mjpython scripts/run_mission.py --viewer       # watch it live (macOS needs mjpython)
 """
 
 import argparse
@@ -14,39 +17,45 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+from space_autonomy.autonomy.agent import make_inspection_agent
+from space_autonomy.evaluation.anomaly_scoring import score_anomalies
 from space_autonomy.evaluation.harness import run_mission
-from space_autonomy.evaluation.plots import plot_states, plot_trajectory
+from space_autonomy.evaluation.plots import plot_assessment, plot_states, plot_trajectory
 from space_autonomy.evaluation.report import format_report, save_run
-from space_autonomy.planning.inspection_planner import fixed_route_inspector
-from space_autonomy.scenarios.alpha03 import nominal
+from space_autonomy.scenarios.alpha03 import nominal, showcase, with_anomalies
 from space_autonomy.sim.render import SceneRenderer
+from space_autonomy.sim.sensors import OnboardCamera
 from space_autonomy.sim.world import SpaceSim
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="results/alpha03-nominal")
-    ap.add_argument("--gif", action="store_true", help="record results/.../mission.gif")
+    ap.add_argument("--seed", type=int, default=1, help="which random set of anomalies")
+    ap.add_argument("--clean", action="store_true", help="no anomalies")
+    ap.add_argument("--showcase", action="store_true", help="one anomaly of each type")
+    ap.add_argument("--out", default=None, help="output folder (default results/<scenario>)")
+    ap.add_argument("--gif", action="store_true", help="record mission.gif")
     ap.add_argument("--viewer", action="store_true", help="live 3D viewer (run with mjpython on macOS)")
     ap.add_argument("--speed", type=float, default=20.0, help="viewer playback speed vs. real time")
     args = ap.parse_args()
 
-    sc = nominal()
-    sim = SpaceSim(sc.vehicle, sc.spacecraft, start_pos=sc.home)
-    autonomy = fixed_route_inspector(sc.vehicle, sc.spacecraft.targets(), sc.spacecraft.obstacles(),
-                                     sc.home, order=sc.route)
-    out = Path(args.out)
+    sc = nominal() if args.clean else showcase() if args.showcase else with_anomalies(args.seed)
+    sim = SpaceSim(sc.vehicle, sc.world, start_pos=sc.home)
+    agent = make_inspection_agent(sc.vehicle, sc.spacecraft, sc.home, sc.route)
+    camera = OnboardCamera(sim, seed=sc.seed)
+    out = Path(args.out or f"results/{sc.name}")
     (out / "views").mkdir(parents=True, exist_ok=True)
+    for old in (out / "views").glob("*.png"):
+        old.unlink()
 
-    planned = [p for leg in autonomy.legs for p in leg.waypoints]
-    cam = SceneRenderer(sim, 640, 480)
+    print(f"Scenario {sc.name}: {len(sc.anomalies)} hidden anomalies")
+    planned = [p for leg in agent.legs for p in leg.waypoints]
     frames, trail = [], []
 
     def on_event(ev, sim):
-        # Arrival at an inspection viewpoint: save what the onboard camera sees.
-        if ev["event"] == "arrived" and ev["leg"] != "home":
-            n = sum(1 for _ in (out / "views").glob("*.png")) + 1
-            plt.imsave(out / "views" / f"{n:02d}_{ev['leg']}.png", cam.render("onboard"))
+        if ev["event"] == "assessed":
+            n = len(list((out / "views").glob("*.png"))) + 1
+            plot_assessment(*agent.last, out / "views" / f"{n:02d}_{ev['leg']}.png")
 
     def on_tick(sim, rows):
         r = rows[-1]
@@ -66,10 +75,14 @@ def main():
         print("Viewer open (it may be behind other windows: Cmd+Tab to 'mjpython'). Starting in 5 s...")
         _hold(viewer, 5.0)
 
-    result = run_mission(sim, autonomy, max_time=sc.max_time, expected_targets=sc.route,
+    result = run_mission(sim, agent, max_time=sc.max_time, expected_targets=sc.route, camera=camera,
                          on_event=on_event, on_tick=on_tick, name=sc.name)
+    result.summary.update(score_anomalies(agent.world_model, sc.anomalies, sc.route))
 
     save_run(out, result)
+    wm_text = agent.world_model.table(f"WORLD MODEL: {sc.spacecraft.name}")
+    (out / "world_model.txt").write_text(wm_text + "\n")
+    (out / "world_model.json").write_text(json.dumps(agent.world_model.to_dict(), indent=2))
     plt.imsave(out / "overview.png", SceneRenderer(sim, 1280, 960).render("overview", trail, planned))
     plot_states(result.telemetry, out / "states.png", f"{sc.name}: fixed-route baseline")
     plot_trajectory(result.telemetry, out / "trajectory.png", sc.spacecraft.obstacles(),
@@ -78,7 +91,14 @@ def main():
         _save_gif(frames, out / "mission.gif")
 
     for e in result.events:
-        print(f"t={e['t']:7.1f}s  {e['event']:<17} {e['leg']}")
+        if e["event"] == "assessed":
+            print(f"t={e['t']:7.1f}s  looked at {e['leg']:<14} -> {e['result']} ({e['confidence']:.0%})")
+    print()
+    print(wm_text)
+    print()
+    print("GROUND TRUTH")
+    for d in result.summary["anomaly_details"] or [{"component": "-", "injected": "none", "detail": ""}]:
+        print(f"  {d['component']:<16}{d['injected']:<17}{d['detail']}")
     print()
     print(format_report(result.summary))
     print(f"\nOutputs in {out}/")

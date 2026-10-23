@@ -24,6 +24,30 @@ class SceneRenderer:
         self.renderer.close()
 
 
+def render_rgbd(renderer, data, camera):
+    """(rgb uint8, depth float32 in metres) from a named camera."""
+    renderer.update_scene(data, camera=camera)
+    rgb = renderer.render().copy()
+    renderer.enable_depth_rendering()
+    renderer.update_scene(data, camera=camera)
+    depth = renderer.render().copy()
+    renderer.disable_depth_rendering()
+    return rgb, depth
+
+
+def render_geom_ids(renderer, data, camera):
+    """Which geom each pixel shows (-1 = empty space)."""
+    renderer.enable_segmentation_rendering()
+    renderer.update_scene(data, camera=camera)
+    # The starfield skybox breaks segmentation output on macOS; space is "nothing" anyway.
+    sky = mujoco.mjtRndFlag.mjRND_SKYBOX
+    renderer.scene.flags[sky] = 0
+    seg = renderer.render().copy()
+    renderer.scene.flags[sky] = 1  # the flag outlives this call; put it back
+    renderer.disable_segmentation_rendering()
+    return np.where(seg[..., 1] == mujoco.mjtObj.mjOBJ_GEOM, seg[..., 0], -1)
+
+
 def _next_geom(scene):
     if scene.ngeom >= scene.maxgeom:
         return None

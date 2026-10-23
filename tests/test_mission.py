@@ -1,10 +1,13 @@
 import numpy as np
 
+from space_autonomy.autonomy.agent import make_inspection_agent
 from space_autonomy.core.geometry import clearance
+from space_autonomy.evaluation.anomaly_scoring import score_anomalies
 from space_autonomy.evaluation.harness import run_mission
 from space_autonomy.planning.inspection_planner import fixed_route_inspector
 from space_autonomy.planning.paths import segment_clear
-from space_autonomy.scenarios.alpha03 import nominal
+from space_autonomy.scenarios.alpha03 import nominal, showcase
+from space_autonomy.sim.sensors import OnboardCamera
 from space_autonomy.sim.world import SpaceSim
 
 
@@ -38,3 +41,16 @@ def test_baseline_mission_succeeds():
     assert s["final_distance_from_start_m"] < 0.1
     assert s["propellant_used_pct"] < 80
     assert np.isfinite([r["x"] for r in result.telemetry]).all()
+
+
+def test_agent_finds_every_anomaly_in_showcase():
+    sc = showcase()
+    sim = SpaceSim(sc.vehicle, sc.world, start_pos=sc.home)
+    agent = make_inspection_agent(sc.vehicle, sc.spacecraft, sc.home, sc.route)
+    result = run_mission(sim, agent, max_time=sc.max_time, expected_targets=sc.route,
+                         camera=OnboardCamera(sim, seed=0), log_hz=2.0)
+    s = {**result.summary, **score_anomalies(agent.world_model, sc.anomalies, sc.route)}
+    assert s["success"] and s["collisions"] == 0
+    assert s["anomalies_found"] == s["anomaly_type_correct"] == 4
+    assert s["false_alarms"] == 0
+    assert sum(e["event"] == "assessed" for e in result.events) == len(sc.route)
